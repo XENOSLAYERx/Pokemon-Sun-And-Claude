@@ -266,15 +266,17 @@ export const ISLANDS: readonly IslandDefinition[] = [
   {
     id: 'poni', name: 'Poni Island',
     centerX: 3000, centerZ: 9000, radius: 4600,
-    baseHeight: 34, baseTemp: 21, baseMoisture: 0.55,
+    // Poni is a high plateau cut by canyons, not a low island. The base height
+    // has to exceed the deepest canyon carve or the interior floods.
+    baseHeight: 280, baseTemp: 21, baseMoisture: 0.55,
     windDirection: 3.6, order: 4, levelRange: [45, 70],
     features: [
-      { kind: 'canyon', x: -1200, z: -1600, x2: 1600, z2: 1800, height: -320, radius: 620, biome: 'canyon' },
+      { kind: 'canyon', x: -1200, z: -1600, x2: 1600, z2: 1800, height: -240, radius: 620, biome: 'canyon' },
       { kind: 'ridge', x: -2200, z: -600, x2: -600, z2: 2200, height: 780, radius: 900 },
       { kind: 'cone', x: 1900, z: -1900, height: 940, radius: 1500, falloff: 1.8 },
       { kind: 'plateau', x: 2400, z: 2200, height: 420, radius: 700, falloff: 0.6, biome: 'ruins' },
       { kind: 'flat', x: -2800, z: 1900, height: 8, radius: 380, biome: 'town' },
-      { kind: 'basin', x: 0, z: 2900, height: -90, radius: 800, biome: 'wetland' },
+      { kind: 'basin', x: 0, z: 2900, height: -150, radius: 800, biome: 'wetland' },
       { kind: 'plateau', x: -1600, z: -2600, height: 560, radius: 540, falloff: 0.55, biome: 'highland' },
     ],
     settlements: [
