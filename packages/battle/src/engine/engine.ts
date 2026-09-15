@@ -864,26 +864,33 @@ export function makeBattlePokemon(params: {
   shiny?: boolean;
   scale?: number;
   isTotem?: boolean;
-  ivs?: number;
+  /**
+   * IVs. A single number applies to every stat (the common case for a wild
+   * Pokémon or a test); a per-stat record carries a real spread, which is what
+   * a captured Pokémon has once it is stored in a save.
+   */
+  ivs?: number | Partial<Record<'hp' | 'atk' | 'def' | 'spa' | 'spd' | 'spe', number>>;
   evs?: number;
 }): BattlePokemon {
   const species = getSpecies(params.speciesId);
-  const iv = params.ivs ?? 31;
+  const ivSpec = params.ivs ?? 31;
+  const ivFor = (key: 'hp' | 'atk' | 'def' | 'spa' | 'spd' | 'spe'): number =>
+    typeof ivSpec === 'number' ? ivSpec : ivSpec[key] ?? 31;
   const ev = params.evs ?? 0;
   const level = params.level;
 
-  const stat = (base: number, isHp: boolean): number => {
+  const stat = (base: number, iv: number, isHp: boolean): number => {
     if (isHp) return Math.floor(((2 * base + iv + Math.floor(ev / 4)) * level) / 100) + level + 10;
     return Math.floor((Math.floor(((2 * base + iv + Math.floor(ev / 4)) * level) / 100) + 5) * 1);
   };
 
   const stats = {
-    hp: stat(species.baseStats.hp, true),
-    atk: stat(species.baseStats.atk, false),
-    def: stat(species.baseStats.def, false),
-    spa: stat(species.baseStats.spa, false),
-    spd: stat(species.baseStats.spd, false),
-    spe: stat(species.baseStats.spe, false),
+    hp: stat(species.baseStats.hp, ivFor('hp'), true),
+    atk: stat(species.baseStats.atk, ivFor('atk'), false),
+    def: stat(species.baseStats.def, ivFor('def'), false),
+    spa: stat(species.baseStats.spa, ivFor('spa'), false),
+    spd: stat(species.baseStats.spd, ivFor('spd'), false),
+    spe: stat(species.baseStats.spe, ivFor('spe'), false),
   };
 
   return {

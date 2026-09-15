@@ -13,6 +13,8 @@
       "@alola/ai/*": ["packages/ai/src/*"],
       "@alola/battle": ["packages/battle/src/index.ts"],
       "@alola/battle/*": ["packages/battle/src/*"],
+      "@alola/game": ["packages/game/src/index.ts"],
+      "@alola/game/*": ["packages/game/src/*"],
       "@alola/quest": ["packages/quest/src/index.ts"],
       "@alola/save": ["packages/save/src/index.ts"],
       "@alola/net": ["packages/net/src/index.ts"],
