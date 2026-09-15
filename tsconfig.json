@@ -1,0 +1,28 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@alola/core": ["packages/core/src/index.ts"],
+      "@alola/core/*": ["packages/core/src/*"],
+      "@alola/data": ["packages/data/src/index.ts"],
+      "@alola/data/*": ["packages/data/src/*"],
+      "@alola/world": ["packages/world/src/index.ts"],
+      "@alola/world/*": ["packages/world/src/*"],
+      "@alola/ai": ["packages/ai/src/index.ts"],
+      "@alola/ai/*": ["packages/ai/src/*"],
+      "@alola/battle": ["packages/battle/src/index.ts"],
+      "@alola/battle/*": ["packages/battle/src/*"],
+      "@alola/quest": ["packages/quest/src/index.ts"],
+      "@alola/save": ["packages/save/src/index.ts"],
+      "@alola/net": ["packages/net/src/index.ts"],
+      "@alola/net/*": ["packages/net/src/*"],
+      "@alola/render": ["packages/render/src/index.ts"],
+      "@alola/render/*": ["packages/render/src/*"],
+      "@alola/audio": ["packages/audio/src/index.ts"],
+      "@alola/ui": ["packages/ui/src/index.ts"],
+      "@alola/ui/*": ["packages/ui/src/*"]
+    }
+  },
+  "include": ["packages/*/src/**/*.ts", "packages/*/test/**/*.ts", "apps/*/src/**/*.ts", "tools/**/*.ts"]
+}
