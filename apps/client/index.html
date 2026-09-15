@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Project Alola</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%234a9eff'/%3E%3Cpath d='M2 16h28' stroke='%2305080f' stroke-width='3'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%2305080f'/%3E%3Ccircle cx='16' cy='16' r='2.6' fill='%23cfe3ff'/%3E%3C/svg%3E" />
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; padding: 0; height: 100%; overflow: hidden;
+        background: #05080f; color: #e8eef7;
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      #viewport { position: fixed; inset: 0; display: block; }
+      /* The battle and menu overlays own the screen; the exploring HUD steps
+         back rather than sitting on top of the nameplates and the log. */
+      #hud { transition: opacity 0.35s ease; }
+      #hud.dimmed { opacity: 0; }
+      #hud {
+        position: fixed; inset: 0; pointer-events: none;
+        padding: max(16px, env(safe-area-inset-top)) 16px 16px;
+        display: flex; flex-direction: column; justify-content: space-between;
+      }
+      .panel {
+        background: rgba(6, 12, 22, 0.72);
+        border: 1px solid rgba(120, 180, 255, 0.18);
+        border-radius: 10px;
+        padding: 10px 13px;
+        font-size: 12px;
+        line-height: 1.55;
+        backdrop-filter: blur(8px);
+        font-variant-numeric: tabular-nums;
+      }
+      .row { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+      .spacer { flex: 1; }
+      .label { color: #7f9dc4; }
+      .value { color: #eaf2ff; font-weight: 600; }
+      h1 { font-size: 13px; margin: 0 0 6px; letter-spacing: 0.08em; text-transform: uppercase; color: #8fb8ff; }
+      #boot {
+        position: fixed; inset: 0; display: grid; place-items: center;
+        background: #05080f; z-index: 10; transition: opacity 0.6s ease;
+      }
+      #boot.done { opacity: 0; pointer-events: none; }
+      .boot-inner { text-align: center; max-width: 420px; padding: 24px; }
+      .boot-title { font-size: 26px; letter-spacing: 0.22em; margin-bottom: 6px; color: #cfe3ff; }
+      .boot-sub { font-size: 12px; color: #6d89ad; letter-spacing: 0.12em; margin-bottom: 26px; }
+      .progress { height: 3px; background: rgba(120,180,255,0.15); border-radius: 2px; overflow: hidden; }
+      .progress > div { height: 100%; width: 0%; background: linear-gradient(90deg,#4a9eff,#8fd4ff); transition: width 0.25s ease; }
+      .boot-step { font-size: 11px; color: #5f7a99; margin-top: 10px; min-height: 16px; }
+      kbd {
+        background: rgba(120,180,255,0.12); border: 1px solid rgba(120,180,255,0.25);
+        border-radius: 4px; padding: 1px 5px; font-size: 11px; font-family: inherit;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="viewport"></canvas>
+
+    <div id="hud">
+      <div class="row">
+        <div class="panel" id="panel-world">
+          <h1>Alola</h1>
+          <div><span class="label">island</span> <span class="value" id="v-island">—</span></div>
+          <div><span class="label">biome</span> <span class="value" id="v-biome">—</span></div>
+          <div><span class="label">time</span> <span class="value" id="v-time">—</span></div>
+          <div><span class="label">weather</span> <span class="value" id="v-weather">—</span></div>
+          <div><span class="label">sea</span> <span class="value" id="v-sea">—</span></div>
+        </div>
+        <div class="spacer"></div>
+        <div class="panel" id="panel-perf">
+          <h1>Performance</h1>
+          <div><span class="label">fps</span> <span class="value" id="v-fps">—</span></div>
+          <div><span class="label">frame</span> <span class="value" id="v-frame">—</span></div>
+          <div><span class="label">draws</span> <span class="value" id="v-draws">—</span></div>
+          <div><span class="label">tris</span> <span class="value" id="v-tris">—</span></div>
+          <div><span class="label">chunks</span> <span class="value" id="v-chunks">—</span></div>
+          <div><span class="label">pokémon</span> <span class="value" id="v-mons">—</span></div>
+          <div><span class="label">quality</span> <span class="value" id="v-quality" style="font-size:11px">—</span></div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="panel" id="panel-controls">
+          <h1>Controls</h1>
+          <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move &nbsp; <kbd>Shift</kbd> sprint &nbsp; <kbd>Space</kbd> ride &nbsp; drag to look</div>
+          <div><kbd>E</kbd> battle the nearest Pokémon &nbsp; <kbd>Tab</kbd> team, bag, dex &amp; save</div>
+          <div><kbd>T</kbd> +1h &nbsp; <kbd>R</kbd> cycle weather &nbsp; <kbd>F</kbd> fly cam &nbsp; <kbd>Q</kbd> quality</div>
+        </div>
+        <div class="spacer"></div>
+        <div class="panel" id="panel-nearby">
+          <h1>Nearby</h1>
+          <div id="v-nearby" style="color:#9fc0e8">—</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="boot">
+      <div class="boot-inner">
+        <div class="boot-title">PROJECT ALOLA</div>
+        <div class="boot-sub">OPEN-WORLD ALOLA</div>
+        <div class="progress"><div id="boot-bar"></div></div>
+        <div class="boot-step" id="boot-step">initialising</div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

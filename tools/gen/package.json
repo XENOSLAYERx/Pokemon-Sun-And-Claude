@@ -1,0 +1,10 @@
+{
+  "name": "@alola/tools",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@alola/core": "*", "@alola/data": "*", "@alola/world": "*",
+    "@alola/ai": "*", "@alola/battle": "*", "@alola/quest": "*", "@alola/save": "*"
+  }
+}
