@@ -39,6 +39,18 @@ import {
   QUALITY_PRESETS, type QualityPreset,
 } from '@alola/render';
 import { AudioDirector } from '@alola/audio';
+import { SaveManager, MemoryStorage, type SaveFile } from '@alola/save';
+import {
+  GameProfile, BattleSession, engageableTarget, ambusher, maxHpOf, isFainted, starterLevelFor,
+  type EncounterCandidate, type EncounterOffer,
+} from '@alola/game';
+import type { TerrainProbe } from '@alola/battle';
+import { LocalStorageAdapter } from './game/storage.ts';
+import { BattleUi } from './game/battle-ui.ts';
+import { BattleStage } from './game/battle-stage.ts';
+import { MenuUi } from './game/menu-ui.ts';
+import { askNewGame } from './game/new-game-ui.ts';
+import { Toast, injectGameStyles, el, hpColor } from './game/ui-kit.ts';
 
 const WORLD_SEED = 20251115;
 const MAX_VISIBLE_POKEMON = 220;
@@ -157,6 +169,36 @@ let visiblePokemonCap = MAX_VISIBLE_POKEMON;
 const audio = new AudioDirector();
 const rig = new CameraRig();
 
+// ---------------------------------------------------------------- the game
+//
+// The client owns presentation; @alola/game owns the rules. `mode` is the only
+// piece of genuinely client-side game state, because what the player can press
+// depends on which overlay has the screen.
+
+type Mode = 'overworld' | 'battle' | 'menu';
+let mode: Mode = 'overworld';
+
+const saveStorageAvailable = LocalStorageAdapter.available();
+const saves = new SaveManager(
+  // Falls back to memory in a private window: the game still runs, it just
+  // cannot persist, and the menu says so rather than failing silently.
+  saveStorageAvailable ? new LocalStorageAdapter() : new MemoryStorage(),
+  '0.1.0',
+);
+const SAVE_SLOT = 0;
+
+injectGameStyles();
+const toast = new Toast();
+
+// Assigned in boot(), before the first frame runs.
+let profile!: GameProfile;
+let session: BattleSession | null = null;
+/** Overworld id of the Pokémon currently being fought, so it can be removed. */
+let battleAgentId = -1;
+/** Seconds before the player can be pulled into another fight. */
+let encounterCooldown = 0;
+let autosaveAccum = 0;
+
 // The preset can only be applied once the lights and shader uniforms exist.
 adaptive.onChange = (preset) => {
   applyQuality(preset);
@@ -189,6 +231,47 @@ const player = {
 };
 player.position.y = terrain.sampleHeight(player.position.x, player.position.z) + 1;
 void melemele;
+
+/**
+ * The terrain probe the battle system uses to find flat ground.
+ *
+ * It reads the same generator the renderer draws from, so the arena a battle
+ * generates is genuinely the ground under the player's feet rather than an
+ * approximation of it.
+ */
+const battleProbe: TerrainProbe = {
+  heightAt: (x, z) => terrain.sampleHeight(x, z),
+  slopeAt: (x, z) => terrain.sample(x, z).slope,
+  biomeAt: (x, z) => classifier.classify(terrain.sample(x, z)).biome.id,
+};
+
+/** Snapshot the parts of the world a save has to remember. */
+function worldSnapshot(): SaveFile['world'] {
+  const weatherState: Record<string, { current: string; remaining: number }> = {};
+  for (const island of allIslands()) {
+    const state = weather.get(island.id);
+    weatherState[island.id] = { current: state.current, remaining: state.remaining };
+  }
+  return {
+    worldSeed: WORLD_SEED,
+    timeOfDay: timeOfDay.hour * 3600,
+    weather: weatherState,
+    ecology: {},
+    modifications: {},
+    discovered: [],
+  };
+}
+
+async function saveGame(): Promise<string> {
+  if (!saveStorageAvailable) {
+    return 'This browser will not let the page store data, so saving is unavailable.';
+  }
+  profile.position = { ...player.position };
+  profile.yaw = player.yaw;
+  profile.island = islandAt(player.position.x, player.position.z)?.id ?? 'melemele';
+  await saves.save(SAVE_SLOT, profile.toSaveFile(worldSnapshot()));
+  return `Saved. ${profile.name} · ₽${profile.money.toLocaleString()} · dex ${profile.dexCaught}`;
+}
 
 // ------------------------------------------------------------------ shaders
 
@@ -398,6 +481,159 @@ function despawnDistant(): void {
   }
 }
 
+// -------------------------------------------------------- encounters
+
+const stage = new BattleStage(scene);
+
+/** Overworld brains, in the shape the encounter rules expect. */
+function encounterCandidates(): EncounterCandidate[] {
+  const out: EncounterCandidate[] = [];
+  for (const brain of brains) {
+    out.push({
+      id: brain.state.id,
+      speciesId: brain.state.speciesId,
+      level: brain.state.level,
+      position: brain.state.position,
+      goal: brain.currentGoal,
+    });
+  }
+  return out;
+}
+
+/** The Pokémon the player could engage right now, recomputed for the prompt. */
+let pendingOffer: EncounterOffer | null = null;
+
+function startBattle(offer: EncounterOffer): void {
+  if (mode !== 'overworld') return;
+
+  if (!profile.hasUsablePokemon) {
+    toast.show('Your team is in no condition to battle.');
+    return;
+  }
+
+  mode = 'battle';
+  battleAgentId = offer.candidate.id;
+  // The overworld must not keep acting on keys held when the fight began.
+  keys.clear();
+
+  const island = islandAt(player.position.x, player.position.z);
+  const islandWeather = weather.get(island?.id ?? 'melemele');
+
+  session = new BattleSession({
+    profile,
+    offer,
+    probe: battleProbe,
+    weather: islandWeather.current,
+    hour: timeOfDay.hour,
+    island: island?.id ?? null,
+    // The encounter seed is derived from the agent and the tick, so the same
+    // encounter is reproducible — which is what makes a battle replayable.
+    seed: (WORLD_SEED ^ (offer.candidate.id * 2654435761) ^ Math.floor(simTime * 60)) | 0,
+  });
+
+  stage.begin(session, player.position);
+  playerMesh.visible = false;
+  // Hide the overworld model of whatever we are fighting; the stage draws it.
+  const visual = pokemonVisuals.get(offer.candidate.id);
+  if (visual) visual.mesh.visible = false;
+
+  syncHudVisibility();
+  battleUi.open(session);
+}
+
+function endBattle(finished: BattleSession, outcome: string): void {
+  stage.end();
+  playerMesh.visible = true;
+  session = null;
+  mode = 'overworld';
+  keys.clear();
+  syncHudVisibility();
+
+  const removeAgent = (): void => {
+    const index = brains.findIndex((b) => b.state.id === battleAgentId);
+    if (index >= 0) {
+      const visual = pokemonVisuals.get(battleAgentId);
+      if (visual) {
+        scene.remove(visual.mesh);
+        pokemonVisuals.delete(battleAgentId);
+      }
+      brains.splice(index, 1);
+    }
+  };
+
+  switch (outcome) {
+    case 'caught': {
+      removeAgent();
+      const name = getSpecies(finished.wild.species).name;
+      toast.show(`${name} was added to your team.`);
+      break;
+    }
+    case 'won': {
+      // A defeated wild Pokémon leaves rather than lying there fainted.
+      removeAgent();
+      toast.show('The wild Pokémon fled.');
+      break;
+    }
+    case 'lost': {
+      const lost = profile.blackOut();
+      toast.show(`You blacked out and lost ₽${lost.toLocaleString()}. Your team was treated.`);
+      // Push the player away from whatever knocked them out, so they do not
+      // wake up inside its aggro radius and immediately lose again.
+      const away = Math.atan2(player.position.x - finished.arena.x, player.position.z - finished.arena.z);
+      player.position.x += Math.sin(away) * 45;
+      player.position.z += Math.cos(away) * 45;
+      player.position.y = terrain.sampleHeight(player.position.x, player.position.z);
+      encounterCooldown = 6;
+      break;
+    }
+    default: {
+      // Fled, or ended some other way. Give the player a moment before the
+      // same Pokémon can drag them back in.
+      const visual = pokemonVisuals.get(battleAgentId);
+      if (visual) visual.mesh.visible = true;
+      encounterCooldown = 4;
+      break;
+    }
+  }
+
+  battleAgentId = -1;
+}
+
+const battleUi = new BattleUi({
+  onFinished: (finished, outcome) => endBattle(finished, outcome),
+  onCue: (cue) => { void cue; },
+});
+
+const menuUi = new MenuUi({
+  onSave: () => saveGame(),
+  onClose: () => { mode = 'overworld'; keys.clear(); syncHudVisibility(); },
+  onHeal: () => toast.show('Your team is rested.'),
+});
+
+/**
+ * Encounter checks, once per frame rather than per simulation tick.
+ *
+ * A tick-rate check would fire up to four times in one frame during catch-up,
+ * which is how you end up starting the same battle twice.
+ */
+function updateEncounters(frameDt: number): void {
+  if (mode !== 'overworld') {
+    pendingOffer = null;
+    return;
+  }
+
+  encounterCooldown = Math.max(0, encounterCooldown - frameDt);
+  const candidates = encounterCandidates();
+  pendingOffer = engageableTarget(player.position, candidates);
+
+  if (encounterCooldown > 0 || !profile.hasUsablePokemon) return;
+
+  // Something that hunts has decided to engage. The player does not get a
+  // choice about this one — that is the whole point of meeting a predator.
+  const ambush = ambusher(player.position, candidates);
+  if (ambush) startBattle(ambush);
+}
+
 // ------------------------------------------------------------------- input
 
 const keys = new Set<string>();
@@ -405,6 +641,22 @@ let dragging = false;
 let flyCam = false;
 
 window.addEventListener('keydown', (e) => {
+  // The battle and menu overlays listen in the capture phase and stop the
+  // event, so reaching here means the overworld has the keyboard.
+  if (e.code === 'KeyE' && mode === 'overworld') {
+    e.preventDefault();
+    if (pendingOffer) startBattle(pendingOffer);
+    return;
+  }
+  if ((e.code === 'Tab' || e.code === 'Escape') && mode === 'overworld') {
+    e.preventDefault();
+    mode = 'menu';
+    keys.clear();
+    syncHudVisibility();
+    menuUi.open(profile);
+    return;
+  }
+
   keys.add(e.code);
   if (e.code === 'KeyT') timeOfDay.advanceToHour((timeOfDay.hour + 1) % 24);
   if (e.code === 'KeyF') flyCam = !flyCam;
@@ -499,6 +751,71 @@ const dom = {
   nearby: document.getElementById('v-nearby')!,
 };
 
+/**
+ * Party strip and the context prompt.
+ *
+ * Built in code rather than in index.html because both are driven entirely by
+ * profile state, and a placeholder in the markup would just be a second place
+ * for the party size to be wrong.
+ */
+const partyPanel = el('div', 'panel');
+partyPanel.id = 'panel-party';
+partyPanel.append(el('h1', undefined, 'Team'));
+const partyList = el('div');
+partyPanel.appendChild(partyList);
+document.getElementById('panel-controls')?.parentElement?.insertBefore(
+  partyPanel,
+  document.getElementById('panel-controls'),
+);
+
+const promptNode = el('div', 'prompt');
+document.body.appendChild(promptNode);
+
+const hudRoot = document.getElementById('hud');
+
+/** The exploring HUD hides itself whenever an overlay has the screen. */
+function syncHudVisibility(): void {
+  hudRoot?.classList.toggle('dimmed', mode !== 'overworld');
+}
+
+function renderPartyPanel(): void {
+  partyList.replaceChildren();
+  if (profile.party.length === 0) {
+    partyList.appendChild(el('div', 'label', 'no Pokémon'));
+    return;
+  }
+  for (const mon of profile.party) {
+    const max = maxHpOf(mon);
+    const fraction = max > 0 ? Math.max(0, mon.currentHp) / max : 0;
+    const row = el('div', 'mon-row');
+    const name = el('span', 'mon-name',
+      `${mon.nickname ?? getSpecies(mon.species).name}${mon.shiny ? ' ✦' : ''}`);
+    name.style.minWidth = '104px';
+    const lv = el('span', 'label', `L${mon.level}`);
+    const bar = el('div', 'mon-bar');
+    const fill = el('div');
+    fill.style.width = `${fraction * 100}%`;
+    fill.style.background = isFainted(mon) ? '#4a5568' : hpColor(fraction);
+    bar.appendChild(fill);
+    row.append(name, lv, bar);
+    partyList.appendChild(row);
+  }
+}
+
+function renderPrompt(): void {
+  if (mode !== 'overworld' || !pendingOffer) {
+    promptNode.classList.remove('show');
+    return;
+  }
+  const species = getSpecies(pendingOffer.candidate.speciesId);
+  promptNode.replaceChildren();
+  const kbd = el('kbd', undefined, 'E');
+  promptNode.append(kbd, document.createTextNode(
+    `  battle the wild ${species.name} (Lv ${pendingOffer.candidate.level})`,
+  ));
+  promptNode.classList.add('show');
+}
+
 let simTime = 0;
 let fpsAccum = 0;
 let fpsFrames = 0;
@@ -519,48 +836,57 @@ function simulate(dt: number): void {
   const islandWeather = weather.get(islandId);
   ocean.setWind(islandWeather.windDirection, islandWeather.windSpeed);
 
-  updatePlayer(dt);
+  profile.playtimeSeconds += dt;
 
-  perceptionGrid.rebuild([
-    {
-      id: 0,
-      position: player.position,
-      speciesId: 'PLAYER',
-      packId: -1,
-      playerId: 'local',
-      noise: player.speed > 6 ? 1 : player.speed > 0 ? 0.5 : 0.1,
-      inactive: false,
-      level: 30,
-    },
-    ...brains.map((b) => ({
-      id: b.state.id,
-      position: b.state.position,
-      speciesId: b.state.speciesId,
-      packId: b.state.packId,
-      playerId: null,
-      noise: 0.4,
-      inactive: false,
-      level: b.state.level,
-    })),
-  ]);
+  // A battle freezes the world's actors but not its environment: the sun still
+  // moves and the sea still runs, so a fight at dusk finishes at dusk — and the
+  // audio director below still gets told what is happening.
+  const actorsRun = mode === 'overworld';
 
-  const visibility = visibilityFrom(islandWeather.fogDensity, timeOfDay.state.daylight, false);
-  const worldView: BrainWorldView = {
-    hour: timeOfDay.hour,
-    daylight: timeOfDay.state.daylight,
-    visibility,
-    now: simTime,
-    grid: perceptionGrid,
-    groundAt: (x, z) => terrain.sampleHeight(x, z),
-  };
+  if (actorsRun) {
+    updatePlayer(dt);
 
-  for (const brain of brains) {
-    const distance = Math.hypot(
-      brain.state.position.x - player.position.x,
-      brain.state.position.z - player.position.z,
-    );
-    brain.state.lod = lodForDistance(distance);
-    brain.update(dt, worldView);
+    perceptionGrid.rebuild([
+      {
+        id: 0,
+        position: player.position,
+        speciesId: 'PLAYER',
+        packId: -1,
+        playerId: 'local',
+        noise: player.speed > 6 ? 1 : player.speed > 0 ? 0.5 : 0.1,
+        inactive: false,
+        level: 30,
+      },
+      ...brains.map((b) => ({
+        id: b.state.id,
+        position: b.state.position,
+        speciesId: b.state.speciesId,
+        packId: b.state.packId,
+        playerId: null,
+        noise: 0.4,
+        inactive: false,
+        level: b.state.level,
+      })),
+    ]);
+
+    const visibility = visibilityFrom(islandWeather.fogDensity, timeOfDay.state.daylight, false);
+    const worldView: BrainWorldView = {
+      hour: timeOfDay.hour,
+      daylight: timeOfDay.state.daylight,
+      visibility,
+      now: simTime,
+      grid: perceptionGrid,
+      groundAt: (x, z) => terrain.sampleHeight(x, z),
+    };
+
+    for (const brain of brains) {
+      const distance = Math.hypot(
+        brain.state.position.x - player.position.x,
+        brain.state.position.z - player.position.z,
+      );
+      brain.state.lod = lodForDistance(distance);
+      brain.update(dt, worldView);
+    }
   }
 
   // Audio direction (mix state only; playback is wired separately).
@@ -575,10 +901,10 @@ function simulate(dt: number): void {
     precipitation: islandWeather.precipitation,
     windSpeed: islandWeather.windSpeed,
     enclosed: false,
-    inBattle: false,
+    inBattle: mode === 'battle',
     isBossBattle: false,
-    threatDistance: Infinity,
-    healthFraction: 1,
+    threatDistance: pendingOffer?.distance ?? Infinity,
+    healthFraction: partyHealthFraction(),
     riding: player.riding,
     onWater: sample.height < 0,
     inCutscene: false,
@@ -603,7 +929,7 @@ function updateStreaming(frameDt: number): void {
   streamer.update(simTime, buildChunk, disposeChunk);
 
   sinceSpawnCheck += frameDt;
-  if (sinceSpawnCheck >= 1.5) {
+  if (sinceSpawnCheck >= 1.5 && mode === 'overworld') {
     sinceSpawnCheck = 0;
     spawnWildlife();
     despawnDistant();
@@ -616,13 +942,25 @@ function render(alpha: number, frameDt: number): void {
   const islandWeather = weather.get(islandId);
   const celestial = timeOfDay.state;
 
-  // Camera.
-  rig.setMode(player.riding ? 'ride' : flyCam ? 'fly' : 'explore');
-  rig.update(frameDt, new Vector3(player.position.x, player.position.y, player.position.z), null);
-  camera.position.copy(rig.position);
-  camera.lookAt(rig.target);
-  camera.fov = rig.fov;
-  camera.updateProjectionMatrix();
+  // Camera. During a battle the stage decides where it goes, easing across
+  // from wherever exploring left it rather than cutting.
+  const staged = stage.active ? stage.cameraFor(camera, frameDt) : null;
+  if (staged) {
+    const weight = Math.min(1, frameDt * 4 + stage.transition * 0.08);
+    camera.position.lerp(staged.position, weight);
+    camera.lookAt(staged.lookAt);
+    camera.fov = 52;
+    camera.updateProjectionMatrix();
+    // Keep the rig tracking the player so leaving the battle does not snap.
+    rig.snap(new Vector3(player.position.x, player.position.y, player.position.z));
+  } else {
+    rig.setMode(player.riding ? 'ride' : flyCam ? 'fly' : 'explore');
+    rig.update(frameDt, new Vector3(player.position.x, player.position.y, player.position.z), null);
+    camera.position.copy(rig.position);
+    camera.lookAt(rig.target);
+    camera.fov = rig.fov;
+    camera.updateProjectionMatrix();
+  }
 
   // Sky follows the camera so it is always centred on the viewer.
   skyMesh.position.copy(camera.position);
@@ -720,6 +1058,9 @@ function updateHud(dt: number): void {
   dom.chunks.textContent = `${streamer.stats.loaded} (q${streamer.stats.queueDepth})`;
   dom.mons.textContent = String(brains.length);
 
+  renderPartyPanel();
+  renderPrompt();
+
   // Nearby Pokémon with what they are actually doing — the fastest way to
   // tell whether the AI is behaving, without attaching a debugger.
   const nearby = brains
@@ -762,9 +1103,103 @@ function frame(): void {
   adaptive.update(frameDt * 1000);
 
   clock.advance(now / 1000, (dt) => simulate(dt));
+  updateEncounters(frameDt);
+  // Streaming keeps running through a battle so the world behind it stays
+  // loaded, but nothing new spawns into a fight.
   updateStreaming(frameDt);
   render(clock.alpha, frameDt);
   updateHud(frameDt);
+  updateAutosave(frameDt);
+}
+
+/**
+ * Autosave.
+ *
+ * Only in the overworld. A save written mid-battle would restore into a world
+ * with no battle in it and a party whose HP came from halfway through one.
+ */
+function updateAutosave(frameDt: number): void {
+  if (mode !== 'overworld' || !saveStorageAvailable) return;
+  autosaveAccum += frameDt;
+  if (autosaveAccum < 120) return;
+  autosaveAccum = 0;
+  void saveGame().then(() => toast.show('Autosaved.', 1.6)).catch((error: unknown) => {
+    toast.show(`Autosave failed: ${error instanceof Error ? error.message : String(error)}`, 4);
+  });
+}
+
+function partyHealthFraction(): number {
+  let current = 0;
+  let max = 0;
+  for (const mon of profile.party) {
+    current += Math.max(0, mon.currentHp);
+    max += maxHpOf(mon);
+  }
+  return max > 0 ? current / max : 1;
+}
+
+/** Levels of everything that can spawn around the player right now. */
+function localSpawnLevels(): number[] {
+  const { cx, cz } = worldToChunk(player.position.x, player.position.z);
+  const islandId = islandAt(player.position.x, player.position.z)?.id ?? 'melemele';
+  const currentWeather = (): WeatherId => weather.weatherIdFor(islandId) as WeatherId;
+  const levels: number[] = [];
+  for (let dz = -1; dz <= 1; dz++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      for (const p of spawner.populateChunk(cx + dx, cz + dz, timeOfDay.hour, currentWeather, new Set<string>())) {
+        levels.push(p.level);
+      }
+    }
+  }
+  return levels;
+}
+
+/**
+ * Load the existing save, or start a new game.
+ *
+ * A save that cannot be read is reported rather than silently discarded: the
+ * one thing worse than losing a save is being told nothing happened.
+ */
+async function loadOrCreateProfile(): Promise<void> {
+  if (saveStorageAvailable) {
+    try {
+      const result = await saves.load(SAVE_SLOT);
+      profile = GameProfile.fromSaveFile(result.save);
+      player.position.x = profile.position.x;
+      player.position.z = profile.position.z;
+      player.position.y = terrain.sampleHeight(profile.position.x, profile.position.z);
+      player.yaw = profile.yaw;
+      // The world clock is part of the save, so a night-time save resumes at night.
+      timeOfDay.advanceToHour(Math.max(0, Math.min(23.99, result.save.world.timeOfDay / 3600)));
+      for (const [islandId, entry] of Object.entries(result.save.world.weather ?? {})) {
+        weather.force(islandId, entry.current as WeatherId, true);
+      }
+      if (result.recoveredFromBackup) {
+        toast.show('Your save was damaged; the backup was restored.', 5);
+      } else if (result.migrationsApplied.length > 0) {
+        toast.show(`Save updated (${result.migrationsApplied.join(', ')}).`, 4);
+      }
+      return;
+    } catch {
+      // No save, or an unreadable one. Fall through to a new game.
+    }
+  }
+
+  const choice = await askNewGame(WORLD_SEED);
+  // Size the starter to whatever actually lives here, rather than to a
+  // constant that happens to be wrong for this coastline.
+  profile = GameProfile.newGame({
+    worldSeed: WORLD_SEED,
+    playerName: choice.name,
+    spawn: { ...player.position },
+    starter: choice.starter,
+    starterLevel: starterLevelFor(localSpawnLevels()),
+  });
+  profile.appearance = choice.appearance;
+  profile.yaw = player.yaw;
+  if (!saveStorageAvailable) {
+    toast.show('This browser blocks site storage, so progress will not be saved.', 6);
+  }
 }
 
 async function boot(): Promise<void> {
@@ -801,6 +1236,13 @@ async function boot(): Promise<void> {
   await reportBoot(85, 'populating Alola');
   spawnWildlife();
 
+  await reportBoot(94, 'reading your save');
+  // Hide the boot screen first: a new game needs the player to answer, and
+  // asking them a question behind a loading curtain is not a question.
+  bootEl.classList.add('done');
+  await loadOrCreateProfile();
+  renderPartyPanel();
+
   await reportBoot(100, 'ready');
   // Open looking out to sea, pitched down slightly so the shoreline and the
   // water are both in frame.
@@ -810,10 +1252,6 @@ async function boot(): Promise<void> {
   rig.pitch = 0.22;
   rig.snap(new Vector3(player.position.x, player.position.y, player.position.z));
 
-  setTimeout(() => {
-    bootEl.classList.add('done');
-  }, 300);
-
   lastFrameTime = performance.now();
   frame();
 }
@@ -822,5 +1260,11 @@ void boot();
 
 // Expose a handle for console debugging — genuinely useful during tuning.
 Object.assign(window as unknown as Record<string, unknown>, {
-  alola: { terrain, weather, timeOfDay, ocean, streamer, brains, player, scene, audio },
+  alola: {
+    terrain, weather, timeOfDay, ocean, streamer, brains, player, scene, audio,
+    get profile() { return profile; },
+    get session() { return session; },
+    get mode() { return mode; },
+    saveGame,
+  },
 });

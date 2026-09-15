@@ -81,13 +81,13 @@ export class GameProfile {
    * The starter is a real party member created through the same path as a
    * capture, so there is exactly one way a Pokémon comes into existence.
    */
-  static newGame(opts: GameProfileOptions & { starter: string }): GameProfile {
+  static newGame(opts: GameProfileOptions & { starter: string; starterLevel?: number }): GameProfile {
     const profile = new GameProfile(opts);
     const rng = new Rng(opts.worldSeed).fork('new-game');
 
     const starter = createPokemon({
       species: opts.starter,
-      level: 5,
+      level: opts.starterLevel ?? 5,
       rng,
       metLocation: 'Iki Town',
     });

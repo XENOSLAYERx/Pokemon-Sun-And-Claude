@@ -10,7 +10,7 @@ import {
   toBattlePokemon, applyBattleResult, toSaved, fromSaved, resetUidCounter,
   Bag, attemptCapture, ballMultiplierFor, statusMultiplierFor,
   engageableTarget, ambusher, canFleeFrom, ENGAGE_RANGE,
-  GameProfile, BattleSession, MAX_PARTY,
+  GameProfile, BattleSession, MAX_PARTY, starterLevelFor,
   type EncounterCandidate, type PartyPokemon,
 } from '../src/index.ts';
 
@@ -249,6 +249,58 @@ describe('Party Pokemon', () => {
     const back = fromSaved(saved);
     assert.ok(back.moves.length >= 1, 'must rebuild rather than load a Pokemon with no moves');
     for (const m of back.moves) assert.doesNotThrow(() => getMove(m.id));
+  });
+});
+
+describe('Starter level', () => {
+  test('sits just above the local median, so the first fight is winnable', () => {
+    // The real distribution sampled around the opening coast.
+    const local = [3, 4, 4, 5, 5, 6, 7, 7, 8, 8, 8, 9, 9, 11, 12, 12, 14];
+    const level = starterLevelFor(local);
+    const median = [...local].sort((a, b) => a - b)[Math.floor(local.length / 2)];
+    assert.equal(level, median + 2);
+    assert.ok(level > median, 'a starter below the local median blacks out on its first encounter');
+  });
+
+  test('is bounded, whatever the table says', () => {
+    assert.equal(starterLevelFor([1, 1, 1]), 5, 'never below 5');
+    assert.equal(starterLevelFor([60, 70, 80]), 20, 'never a level 82 starter');
+  });
+
+  test('falls back sanely with nothing to sample', () => {
+    assert.equal(starterLevelFor([]), 5);
+  });
+
+  test('a starter actually beats a median local Pokemon more often than not', () => {
+    // The regression this exists to prevent: the first battle of a new game
+    // ending in a blackout. Play it out 12 times with different seeds.
+    const local = [4, 5, 6, 7, 8, 8, 9, 11, 12];
+    const median = [...local].sort((a, b) => a - b)[Math.floor(local.length / 2)];
+    const level = starterLevelFor(local);
+
+    let wins = 0;
+    for (let seed = 1; seed <= 12; seed++) {
+      resetUidCounter(1);
+      const profile = GameProfile.newGame({
+        worldSeed: seed, playerName: 'Kai', spawn: { x: 0, y: 12, z: 0 },
+        starter: 'LITTEN', starterLevel: level,
+      });
+      const session = new BattleSession({
+        profile,
+        offer: {
+          candidate: { id: 1, speciesId: 'GRUBBIN', level: median, position: { x: 3, y: 12, z: 0 }, goal: 'wander' },
+          distance: 3, reason: 'player-engaged',
+        },
+        probe: FLAT_PROBE, weather: null, hour: 12, island: 'melemele', seed,
+      });
+      for (let turn = 0; turn < 40 && session.outcome === 'ongoing'; turn++) {
+        const move = session.playerActive.moves.find((m) => m.pp > 0);
+        if (!move) break;
+        session.submit({ kind: 'move', moveId: move.id });
+      }
+      if (session.outcome === 'won') wins++;
+    }
+    assert.ok(wins >= 9, `starter won only ${wins}/12 opening fights at level ${level} vs ${median}`);
   });
 });
 

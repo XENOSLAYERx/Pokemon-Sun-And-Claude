@@ -26,7 +26,7 @@ but packages do.**
 
 `@alola/world` cannot accidentally import Three.js, because Three.js is not in
 its `package.json`. That guarantee is what makes the headless server and the
-430 browser-free tests possible, and it degrades the moment the boundary is
+504 browser-free tests possible, and it degrades the moment the boundary is
 only a convention.
 
 ## 3. Packages
@@ -157,7 +157,7 @@ not reproducible is not shippable.
 enums and constructor parameter properties.
 
 That is a real constraint with a real payoff: every source file runs directly
-under `node --experimental-strip-types` with no build step. The 430-test suite
+under `node --experimental-strip-types` with no build step. The 504-test suite
 and the headless simulation execute against source, not against a compiled
 artefact that could differ from it.
 

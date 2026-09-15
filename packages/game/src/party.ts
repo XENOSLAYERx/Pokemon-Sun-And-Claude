@@ -209,6 +209,28 @@ export function awardExp(mon: PartyPokemon, amount: number): LevelUpResult {
   return { levelsGained: after - before, newLevel: after, learned };
 }
 
+/**
+ * What level should the starter be?
+ *
+ * Not a constant. The player begins wherever the world put them, and the
+ * spawn table around that point is not tuned to a fixed number — around the
+ * opening coast it runs level 3 to 14 with a median of 8. A hardcoded level 5
+ * starter therefore meets its first wild Pokemon three levels up and can quite
+ * reasonably lose, which is exactly what happened the first time this was
+ * played end to end: a level 5 Litten blacked out to a level 8 Grubbin on the
+ * opening encounter.
+ *
+ * So derive it: sit slightly above the local median, which makes the first few
+ * fights winnable without making them free, and still leaves the high end of
+ * the local range as a genuine threat.
+ */
+export function starterLevelFor(nearbyLevels: readonly number[]): number {
+  if (nearbyLevels.length === 0) return 5;
+  const sorted = [...nearbyLevels].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  return clamp(median + 2, 5, 20);
+}
+
 // ------------------------------------------------------------------ health
 
 export function healFully(mon: PartyPokemon): void {

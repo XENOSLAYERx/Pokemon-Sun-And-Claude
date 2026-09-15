@@ -9,10 +9,18 @@
     "preview": "vite preview --port 4173"
   },
   "dependencies": {
-    "@alola/core": "*", "@alola/data": "*", "@alola/world": "*",
-    "@alola/ai": "*", "@alola/battle": "*", "@alola/quest": "*",
-    "@alola/save": "*", "@alola/net": "*", "@alola/audio": "*",
-    "@alola/render": "*", "@alola/ui": "*",
+    "@alola/core": "*",
+    "@alola/data": "*",
+    "@alola/world": "*",
+    "@alola/ai": "*",
+    "@alola/battle": "*",
+    "@alola/game": "*",
+    "@alola/quest": "*",
+    "@alola/save": "*",
+    "@alola/net": "*",
+    "@alola/audio": "*",
+    "@alola/render": "*",
+    "@alola/ui": "*",
     "three": "^0.186.0"
   },
   "devDependencies": {

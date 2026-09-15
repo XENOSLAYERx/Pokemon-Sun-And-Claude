@@ -3,13 +3,14 @@
 An open-world 3D reimagining of Alola — the region of *Pokémon Sun & Moon* —
 rebuilt as a seamless, streaming, living archipelago.
 
-This repository is a **working simulation**, not a slide deck. Five islands are
+This repository is a **playable game**, not a slide deck. Five islands are
 generated, streamed and classified into biomes; Pokémon spawn from weighted
 tables and then live their own lives — hunting, fleeing, flocking, sleeping,
-defending territory; weather evolves per island and drives the ocean; a
-deterministic battle engine resolves fights that can be replayed exactly. It
-runs in a browser, it runs headless on a server, and 430 tests run in Node with
-no browser and no build step.
+defending territory; weather evolves per island and drives the ocean. Walk up to
+one of them, press **E**, and you are in a cinematic battle staged on the exact
+ground you were standing on. Catch it, level your team, save, come back. It runs
+in a browser, it runs headless on a server, and 504 tests run in Node with no
+browser and no build step.
 
 📚 **[Full documentation index →](docs/README.md)** — twenty design documents,
 seven technical design documents, a production roadmap and a world design bible.
@@ -21,7 +22,7 @@ seven technical design documents, a production roadmap and a world design bible.
 ```bash
 npm install
 
-npm test                  # 430 tests, ~1.7s, no browser required
+npm test                  # 504 tests, ~1.7s, no browser required
 npm run typecheck         # tsc --noEmit, strict
 npm run validate:content  # referential integrity across every content table
 
@@ -33,6 +34,25 @@ npm run sim               # headless simulation harness with per-system timings
 Node ≥ 20.11. **There is no build step.** `erasableSyntaxOnly` is enabled, so
 every source file executes directly under `node --experimental-strip-types` —
 no enums, no parameter properties, nothing that survives type erasure.
+
+### Playing it
+
+`npm run dev`, then pick a name and a partner.
+
+| | |
+|---|---|
+| **W A S D** | move (camera-relative) · **Shift** sprint · **Space** ride |
+| drag | look around |
+| **E** | battle the nearest wild Pokémon |
+| **Tab** | team, bag, Pokédex and save |
+| **T / R / F / Q** | advance an hour · cycle weather · fly camera · quality |
+
+In a battle: arrow keys or W/A/S/D to move the cursor, Enter to choose, Esc to
+back out. A Z-Move opens a short timing minigame — perform the pose.
+
+The world keeps running while you fight. The sun still moves, the sea still
+runs, and the other Pokémon on the hillside carry on with whatever they were
+doing.
 
 ---
 
@@ -93,6 +113,24 @@ no enums, no parameter properties, nothing that survives type erasure.
   flatter ground, with biome-appropriate surfaces and camera framing that keeps
   both combatants in shot whatever their size.
 
+### Playing
+- **A real game loop.** Name yourself, choose a partner, explore, engage what
+  you find, catch it, level your team, save, reload.
+- **No encounter screens.** The prompt appears when something engageable is in
+  range; the battle stages on the ground you are standing on and the camera
+  eases across rather than cutting.
+- **Predators engage you.** An aggressive, territorial, apex or protective
+  species that has decided to hunt starts the fight itself — and an apex
+  predator or a provoked Bewear cannot be run from.
+- **Movesets are derived**, not authored: from the species' types, its better
+  attacking stat, and a power cap by level. Deterministic, so a wild Pokémon
+  met twice has the same moves.
+- **Catching** with ball and status multipliers, where Dusk and Net Balls only
+  earn theirs under the right conditions, and the shake count is derived from
+  the same probability as the result.
+- **Versioned saves to localStorage** with autosave, migration on load, and
+  backup recovery — never mid-battle, because that restores into a broken state.
+
 ### Systems
 - **Quests** with branching objectives, an acyclic and fully reachable
   objective graph, and NPC reputation across 10 factions.
@@ -110,12 +148,13 @@ no enums, no parameter properties, nothing that survives type erasure.
 
 ## Architecture in one paragraph
 
-Eleven packages under `packages/`, with one rule that shapes everything: **no
+Twelve packages under `packages/`, with one rule that shapes everything: **no
 package below the presentation boundary may import Three.js, the DOM or Node.**
-`core`, `data`, `world`, `ai`, `battle`, `quest`, `save`, `net` and `audio` are
-pure simulation; only `render`, `ui` and the apps above them touch a renderer.
+`core`, `data`, `world`, `ai`, `battle`, `game`, `quest`, `save`, `net` and
+`audio` are pure simulation; only `render`, `ui` and the apps above them touch a
+renderer.
 That is why the same code runs in a browser, on a headless server and inside
-`node --test`, and why 430 tests need no browser. See
+`node --test`, and why 504 tests need no browser. See
 [`docs/01-architecture.md`](docs/01-architecture.md).
 
 ```
@@ -125,6 +164,7 @@ packages/
   world    terrain, streaming, biomes, weather, time of day, ocean, ecology
   ai       perception, utility scoring, behaviour trees, memory, flocking
   battle   damage, engine, Totems, Z-Move cinematics, arenas, trainer AI
+  game     movesets, party, bag, encounters, capture, battle sessions, profile
   quest    objective graphs, branching, reputation
   save     schema, migrations, atomic commit
   net      protocol, interest management, prediction, interpolation
@@ -176,9 +216,9 @@ Full breakdown in [`docs/tdd/tdd-07-performance.md`](docs/tdd/tdd-07-performance
 ## Verification
 
 ```
-npm test                 430 passing   core 42 · data 42 · world 60 · ai 66
-                                       battle 63 · quest 18 · save 18 · net 29
-                                       audio 17 · render 43 · ui 32
+npm test                 504 passing   core 42 · data 42 · world 60 · ai 66
+                                       battle 63 · game 74 · quest 18 · save 18
+                                       net 29 · audio 17 · render 43 · ui 32
 npm run typecheck        clean
 npm run validate:content referential integrity across every content table
 npm run sim              long-run stability, no NaN, no runaway populations
@@ -186,9 +226,27 @@ node --experimental-strip-types apps/server/src/main.ts --selftest
                          boots the world headless and asserts wildlife spawned
 ```
 
-The client was additionally driven in a real browser (Playwright + SwiftShader):
-zero page errors, 430 chunks resident, 40 Pokémon pursuing distinct goals, and
-weather visibly driving the ocean.
+The game was additionally played end to end in a real browser (Playwright +
+SwiftShader), with **zero page errors**:
+
+```
+boot completes                      ok
+new-game screen appears             ok — Rowlet / Litten / Popplio
+choose Litten and begin             ok
+the party HUD shows the starter     ok — Litten
+teleport next to a wild Pokemon     ok — GRUBBIN lv4 (40 loaded)
+the engage prompt shows             ok — E  battle the wild Grubbin (Lv 8)
+press E to start a battle           ok — battle
+battle UI is populated              ok — Fight/Bag/Pokémon/Run · arena tropical-forest/foliage
+the move list shows real moves      ok — Ember, Razor Leaf, Tackle, Quick Attack
+fight a full battle to a conclusion ok — won
+the battle changed the profile      ok — exp 1136, hp 30/30, dex 2 seen
+catch a Pokemon with a Master Ball  ok — caught, now 2 Pokemon
+open the menu with Tab              ok — Verifier · ₽3,000 · dex 2/2
+save the game                       ok — Saved. Verifier · ₽3,000 · dex 2
+the save is really in localStorage   ok — v4, 2 in party, 2.7 KB
+reload and confirm the save loads   ok — Verifier, 2 Pokemon: LITTEN, GRUBBIN
+```
 
 ---
 
@@ -200,6 +258,7 @@ weather visibly driving the ocean.
 | [Vision](docs/00-vision.md) | What this game is and what it is for |
 | [Architecture](docs/01-architecture.md) | The presentation boundary and why it holds |
 | [World design bible](docs/20-world-design-bible.md) | All five islands, POI by POI |
+| [The game layer](docs/21-game-layer.md) | Movesets, encounters, capture, saving — what turns the simulation into a game |
 | [Code examples](docs/17-code-examples.md) | 22 real excerpts, with the reasoning behind each |
 | [Roadmap](docs/production/18-roadmap.md) · [Milestones](docs/production/19-milestones.md) | Production plan |
 | [TDDs](docs/README.md#technical-design-documents) | Determinism, terrain, ocean, ECS, battle, netcode, performance |
@@ -208,10 +267,16 @@ weather visibly driving the ocean.
 
 ## Status
 
-This is a deep vertical slice of the simulation layer, not a finished game. Each
-document's **Not done** section is accurate and specific: there is no transport
-layer under the netcode, no GPU profiling, no occlusion culling, no art assets,
-and ability coverage in battle is partial. What exists, works, is tested, and is
+Playable end to end — verified in a real browser: start a run, engage a wild
+Pokémon, fight it to a conclusion, catch one, save, reload, and the save comes
+back. Zero page errors.
+
+It is still a vertical slice. Each document's **Not done** section is accurate
+and specific, and the headline gaps are: no transport layer under the netcode,
+no GPU profiling, no occlusion culling, **no art assets** (Pokémon are coloured
+capsules), ability and move-effect coverage in battle is partial, and the
+trials, Totem bosses and quest content exist as tested systems without an
+authored campaign in front of them. What exists, works, is tested, and is
 honest about its edges.
 
 *Not affiliated with or endorsed by Nintendo, Game Freak or The Pokémon Company.

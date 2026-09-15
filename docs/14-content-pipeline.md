@@ -201,7 +201,7 @@ jobs:
     - npm ci
     - npm run typecheck                    # tsc --noEmit, strict
     - npm run validate:content             # 0 errors required
-    - npm run test                         # 430 tests
+    - npm run test                         # 504 tests
     - npm run bake:content                 # must succeed
     - npm run sim -- --hours 2 --agents 200  # must report stable
 ```

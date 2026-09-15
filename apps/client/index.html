@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Project Alola</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%234a9eff'/%3E%3Cpath d='M2 16h28' stroke='%2305080f' stroke-width='3'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%2305080f'/%3E%3Ccircle cx='16' cy='16' r='2.6' fill='%23cfe3ff'/%3E%3C/svg%3E" />
     <style>
       :root { color-scheme: dark; }
       * { box-sizing: border-box; }
@@ -13,6 +14,10 @@
         font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
       }
       #viewport { position: fixed; inset: 0; display: block; }
+      /* The battle and menu overlays own the screen; the exploring HUD steps
+         back rather than sitting on top of the nameplates and the log. */
+      #hud { transition: opacity 0.35s ease; }
+      #hud.dimmed { opacity: 0; }
       #hud {
         position: fixed; inset: 0; pointer-events: none;
         padding: max(16px, env(safe-area-inset-top)) 16px 16px;
@@ -79,8 +84,9 @@
       <div class="row">
         <div class="panel" id="panel-controls">
           <h1>Controls</h1>
-          <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move &nbsp; <kbd>Shift</kbd> sprint &nbsp; <kbd>Space</kbd> ride</div>
-          <div>drag to look &nbsp; <kbd>T</kbd> +1h &nbsp; <kbd>R</kbd> cycle weather &nbsp; <kbd>F</kbd> fly cam &nbsp; <kbd>Q</kbd> quality</div>
+          <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move &nbsp; <kbd>Shift</kbd> sprint &nbsp; <kbd>Space</kbd> ride &nbsp; drag to look</div>
+          <div><kbd>E</kbd> battle the nearest Pokémon &nbsp; <kbd>Tab</kbd> team, bag, dex &amp; save</div>
+          <div><kbd>T</kbd> +1h &nbsp; <kbd>R</kbd> cycle weather &nbsp; <kbd>F</kbd> fly cam &nbsp; <kbd>Q</kbd> quality</div>
         </div>
         <div class="spacer"></div>
         <div class="panel" id="panel-nearby">
@@ -93,7 +99,7 @@
     <div id="boot">
       <div class="boot-inner">
         <div class="boot-title">PROJECT ALOLA</div>
-        <div class="boot-sub">OPEN-WORLD PROTOTYPE</div>
+        <div class="boot-sub">OPEN-WORLD ALOLA</div>
         <div class="progress"><div id="boot-bar"></div></div>
         <div class="boot-step" id="boot-step">initialising</div>
       </div>

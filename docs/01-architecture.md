@@ -19,7 +19,7 @@ It buys four things that are otherwise very expensive to retrofit:
 1. **The server runs the real game.** `apps/server` imports the same
    `@alola/world` and `@alola/ai` the client does. There is no second,
    drifting implementation of movement or spawning to keep in sync.
-2. **The simulation is testable.** 430 tests run in Node with no browser, no
+2. **The simulation is testable.** 504 tests run in Node with no browser, no
    GPU and no mocking layer. Ecosystem behaviour over 1,000 ticks is a unit
    test, not a play session.
 3. **It can move to a Worker.** Nothing in the simulation touches the main

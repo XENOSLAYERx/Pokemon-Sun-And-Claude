@@ -37,6 +37,7 @@ section rather than describing the intention as if it were the implementation.
 | 19 | **Milestones** | [`production/19-milestones.md`](production/19-milestones.md) |
 | 20 | **Source code examples** | [`17-code-examples.md`](17-code-examples.md) |
 | — | World design bible (all five islands, POI by POI) | [`20-world-design-bible.md`](20-world-design-bible.md) |
+| — | **The game layer** — what turns the simulation into something you play | [`21-game-layer.md`](21-game-layer.md) |
 
 ## Technical design documents
 
@@ -67,6 +68,9 @@ answer cost.
 **"Show me the code."**
 → [`17-code-examples.md`](17-code-examples.md) — 22 real excerpts with the reasoning and the measurements behind each
 
+**"How does it actually play?"**
+→ [`21-game-layer.md`](21-game-layer.md) — movesets, encounters, capture, saving, and the presentation on top
+
 **"How do the Pokémon behave?"**
 → [`04-ai-architecture.md`](04-ai-architecture.md) → [`11-spawning-architecture.md`](11-spawning-architecture.md) → [`12-weather-architecture.md`](12-weather-architecture.md)
 
@@ -82,9 +86,9 @@ answer cost.
 
 | | |
 |---|---|
-| Packages | 11 (`@alola/core` … `@alola/ui`) + client, server, tools |
+| Packages | 12 (`@alola/core` … `@alola/ui`) + client, server, tools |
 | TypeScript | 27,609 lines across 99 files |
-| Tests | **430 passing**, ~1.7s, no browser and no build step |
+| Tests | **504 passing**, ~2s, no browser and no build step |
 | Species | 53, with battle stats *and* overworld behaviour fields |
 | Moves | 50, plus 14 Z-Moves with pose, camera beats and environment reactions |
 | Biomes | 28, across 5 islands |
@@ -92,15 +96,16 @@ answer cost.
 | Items | 45, with a coherent price curve |
 | Trials / quests | 7 trials with Totem encounters · 11 quests · 10 reputation factions |
 | World | 40km × 40km, streamed to 3.6km with far terrain to 20km |
+| Playable | New game → explore → engage → battle → catch → save → reload, verified in a browser |
 
-Per-package test counts: core 42 · data 42 · world 60 · ai 66 · battle 63 ·
+Per-package test counts: core 42 · data 42 · world 60 · ai 66 · battle 63 · game 74 ·
 quest 18 · save 18 · net 29 · audio 17 · render 43 · ui 32.
 
 ## Running it
 
 ```bash
 npm install
-npm test                  # 430 tests, no browser required
+npm test                  # 504 tests, no browser required
 npm run typecheck         # tsc --noEmit, strict, erasableSyntaxOnly
 npm run validate:content  # referential integrity across every content table
 npm run sim               # headless simulation harness with timings

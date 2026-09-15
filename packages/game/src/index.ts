@@ -9,7 +9,7 @@
 export { movesetFor, powerCapForLevel, totalPp } from './moveset.ts';
 
 export {
-  createPokemon, maxHpOf, isFainted, healFully, healBy, awardExp, expYield,
+  createPokemon, maxHpOf, isFainted, healFully, healBy, awardExp, expYield, starterLevelFor,
   expForLevel, levelForExp, toBattlePokemon, applyBattleResult, toSaved, fromSaved,
   reserveUid, resetUidCounter,
 } from './party.ts';
