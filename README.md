@@ -12,6 +12,8 @@ ground you were standing on. Catch it, level your team, save, come back. It runs
 in a browser, it runs headless on a server, and 504 tests run in Node with no
 browser and no build step.
 
+🎮 **[How to play →](PLAYING.md)** — setup, controls and troubleshooting, from a clean machine.
+
 📚 **[Full documentation index →](docs/README.md)** — twenty design documents,
 seven technical design documents, a production roadmap and a world design bible.
 
@@ -37,7 +39,8 @@ no enums, no parameter properties, nothing that survives type erasure.
 
 ### Playing it
 
-`npm run dev`, then pick a name and a partner.
+`npm run dev`, then open <http://localhost:5173/> and pick a name and a partner.
+**[PLAYING.md](PLAYING.md)** has the full setup, troubleshooting and tips.
 
 | | |
 |---|---|

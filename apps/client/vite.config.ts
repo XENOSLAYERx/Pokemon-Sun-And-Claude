@@ -16,6 +16,7 @@ export default defineConfig({
       '@alola/world': pkg('world'),
       '@alola/ai': pkg('ai'),
       '@alola/battle': pkg('battle'),
+      '@alola/game': pkg('game'),
       '@alola/quest': pkg('quest'),
       '@alola/save': pkg('save'),
       '@alola/net': pkg('net'),
