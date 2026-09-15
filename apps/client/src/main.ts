@@ -181,7 +181,7 @@ const melemele = allIslands().find((i) => i.id === 'melemele')!;
  * showed them a flat beige plane.
  */
 const player = {
-  position: vec3(-8540, 0, -5580),
+  position: vec3(-8505, 0, -5545),
   velocity: vec3(),
   yaw: 0,
   riding: false,
@@ -805,7 +805,9 @@ async function boot(): Promise<void> {
   // Open looking out to sea, pitched down slightly so the shoreline and the
   // water are both in frame.
   rig.yaw = -2.0943;
-  rig.pitch = 0.30;
+  // A shallow pitch keeps the horizon low in frame, so the sea and the
+  // distant islands are the subject rather than the grass underfoot.
+  rig.pitch = 0.22;
   rig.snap(new Vector3(player.position.x, player.position.y, player.position.z));
 
   setTimeout(() => {
