@@ -25,6 +25,13 @@ export const SEA_LEVEL = 0;
 /** Minimum elevation for the interior of a landmass, in metres. */
 const MIN_LAND_HEIGHT = 4;
 
+/**
+ * Maximum fractional extension of an island's radius by the coastline warp.
+ * Used both to apply the warp and to reject distant samples before doing
+ * any noise work.
+ */
+const COAST_WARP = 0.22;
+
 /** Biomes an authored feature can declare to legitimately sit below sea level. */
 const WATER_BIOMES = new Set<BiomeId>(['lake', 'river', 'ocean', 'reef', 'deep-ocean']);
 
@@ -99,7 +106,19 @@ export class TerrainGenerator {
   private islandMask(island: IslandDefinition, x: number, z: number): number {
     const dx = x - island.centerX;
     const dz = z - island.centerZ;
-    const dist = Math.sqrt(dx * dx + dz * dz);
+    const distSq = dx * dx + dz * dz;
+
+    // Cheap rejection before any noise work.
+    //
+    // The coast warp can extend the effective radius by at most COAST_WARP,
+    // so anything beyond that bound is definitively ocean. This matters a
+    // great deal: sampleHeight tests every island, and without this early-out
+    // each sample evaluated a 4-octave fBm five times over — which profiling
+    // showed was the single largest cost in terrain generation.
+    const maxRadius = island.radius * (1 + COAST_WARP);
+    if (distSq >= maxRadius * maxRadius) return 0;
+
+    const dist = Math.sqrt(distSq);
 
     // Warp the effective radius with low-frequency noise: peninsulas and bays.
     const angle = Math.atan2(dz, dx);
@@ -107,7 +126,7 @@ export class TerrainGenerator {
       octaves: 4,
       frequency: 1,
     });
-    const effectiveRadius = island.radius * (1 + coastNoise * 0.22);
+    const effectiveRadius = island.radius * (1 + coastNoise * COAST_WARP);
 
     if (dist >= effectiveRadius) return 0;
 
@@ -371,6 +390,57 @@ export class TerrainGenerator {
       normalX: nx,
       normalY: ny,
       normalZ: nz,
+      slope,
+      moisture,
+      temperature,
+      island,
+      forcedBiome: island ? this.forcedBiomeAt(island, x, z) : null,
+    };
+  }
+
+  /**
+   * Build a full sample from a height and normal the caller already has.
+   *
+   * `sample()` spends five height evaluations estimating a normal by finite
+   * differences. A mesher walking a regular grid already knows its neighbours'
+   * heights and can derive the normal for free, so paying for those five
+   * samples per vertex is pure waste — and it was the dominant cost of chunk
+   * generation. This variant lets the mesher supply what it already computed.
+   */
+  sampleFrom(
+    x: number,
+    z: number,
+    height: number,
+    normalX: number,
+    normalY: number,
+    normalZ: number,
+  ): TerrainSample {
+    const slope = Math.acos(clamp(normalY, -1, 1));
+
+    let island: IslandDefinition | null = null;
+    for (const isl of ISLANDS) {
+      if (this.islandMask(isl, x, z) > 0) {
+        island = isl;
+        break;
+      }
+    }
+
+    const baseTemp = island?.baseTemp ?? 26;
+    const baseMoisture = island?.baseMoisture ?? 1;
+
+    const tempNoise = fbm2D(this.moistureNoise, x * 0.0004 + 91, z * 0.0004 + 17, { octaves: 3 });
+    const temperature = baseTemp - Math.max(0, height) * TERRAIN_TUNING.lapseRate + tempNoise * 3.5;
+
+    const moistNoise = fbm2D(this.moistureNoise, x * 0.0006, z * 0.0006, { octaves: 4 });
+    let moisture = baseMoisture + moistNoise * 0.28 - Math.max(0, height) * TERRAIN_TUNING.orographicFactor;
+    if (height <= SEA_LEVEL) moisture = 1;
+    moisture = clamp01(moisture);
+
+    return {
+      height,
+      normalX,
+      normalY,
+      normalZ,
       slope,
       moisture,
       temperature,

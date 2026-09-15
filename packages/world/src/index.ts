@@ -22,6 +22,8 @@ export {
   LOD_RESOLUTIONS,
   LOD_RADII,
   MAX_LOD,
+  STREAMING_RADIUS,
+  FAR_TERRAIN_RADIUS,
   chunkKey,
   chunkCoordX,
   chunkCoordZ,

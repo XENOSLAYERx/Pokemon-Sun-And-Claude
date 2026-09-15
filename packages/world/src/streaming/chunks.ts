@@ -30,16 +30,52 @@ import { clamp } from '@alola/core';
 export const CHUNK_SIZE = 256;
 
 /** Vertex resolution per LOD level. LOD0 is 2m/vertex; each level halves it. */
-export const LOD_RESOLUTIONS = [128, 64, 32, 16, 8] as const;
-export const MAX_LOD = LOD_RESOLUTIONS.length - 1;
+export const LOD_RESOLUTIONS = [128, 64, 32, 16] as const;
 
 /**
  * Ring radii in metres. A chunk whose centre is within radius[i] gets LOD i.
- * Tuned so that LOD0 covers the area where the player can see surface detail,
- * and the outermost ring reaches the horizon at sea level (~9km for a 1.7m eye
- * height is 4.6km; we push to 8km because Alola's peaks are visible much further).
+ *
+ * The outermost ring stops at 3.6km, not at the visible horizon, and that is a
+ * deliberate correction found by profiling the headless simulation.
+ *
+ * An earlier build streamed chunks out to 8km so that distant islands stayed
+ * visible. The area of a ring grows with the square of its radius, so that
+ * outermost band alone accounted for roughly 2,450 of the ~3,070 loaded chunks
+ * — 80% of all streaming memory and per-chunk overhead spent on terrain
+ * occupying a handful of pixels.
+ *
+ * Everything beyond `STREAMING_RADIUS` is drawn instead by a single coarse
+ * mesh per island (see @alola/render's far-terrain module): five draw calls
+ * for the whole archipelago rather than thousands of chunk objects. Distant
+ * islands are still visible — they are simply not paying chunk cost to be so.
  */
-export const LOD_RADII = [400, 900, 1800, 3600, 8000] as const;
+export const LOD_RADII = [400, 900, 1800, 3600] as const;
+
+/**
+ * Beyond this distance, terrain is the far-terrain mesh rather than streamed
+ * chunks. The far mesh overlaps the outermost ring slightly so there is never
+ * a gap at the handover.
+ */
+export const STREAMING_RADIUS = LOD_RADII[LOD_RADII.length - 1];
+
+export const MAX_LOD = LOD_RADII.length - 1;
+
+/**
+ * The two LOD tables must stay the same length: `MAX_LOD` indexes both, and a
+ * mismatch makes the radius lookup return undefined, which silently disables
+ * streaming entirely rather than failing loudly. That exact regression was
+ * introduced once while tuning the ring radii and caught only by the headless
+ * simulation reporting zero chunks built, so it is now an invariant.
+ */
+if (LOD_RESOLUTIONS.length !== LOD_RADII.length) {
+  throw new Error(
+    `LOD table mismatch: ${LOD_RESOLUTIONS.length} resolutions but ${LOD_RADII.length} radii. ` +
+      'Every LOD ring needs exactly one mesh resolution.',
+  );
+}
+
+/** How far the far-terrain mesh renders. Alola's peaks are visible a long way. */
+export const FAR_TERRAIN_RADIUS = 20000;
 
 export type ChunkKey = number;
 

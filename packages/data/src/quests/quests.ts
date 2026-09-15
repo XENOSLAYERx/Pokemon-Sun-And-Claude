@@ -213,6 +213,30 @@ export const QUESTS: readonly QuestDefinition[] = [
     repeatable: false,
   },
   {
+    id: 'main-05-aether-summit', name: 'Aether Paradise',
+    category: 'main', island: 'aether', giver: 'npc:wicke', recommendedLevel: 45,
+    summary: 'The foundation invites you to see their work. What they show you is not what is in the basement.',
+    objectives: [
+      { id: 'arrive', kind: 'reach', text: 'Dock at Aether Paradise.', target: 'marker:aether_dock' },
+      { id: 'tour', kind: 'talk', text: 'Take the tour of the Conservation Area.', target: 'npc:wicke', requires: ['arrive'] },
+      { id: 'notice', kind: 'investigate', text: 'Notice the lift that is not on the tour.', target: 'marker:aether_lift_b1', requires: ['tour'] },
+      { id: 'descend', kind: 'reach', text: 'Descend to the secret labs.', target: 'marker:aether_b2', requires: ['notice'] },
+      { id: 'witness', kind: 'investigate', text: 'See what is in containment.', target: 'event:ub_containment', requires: ['descend'] },
+      { id: 'escape', kind: 'survive', text: 'Get out through security.', target: 'event:aether_security', requires: ['witness'], timeLimit: 240 },
+    ],
+    rewards: {
+      default: {
+        money: 15000,
+        items: [{ id: 'beast-ball', count: 3 }, { id: 'max-potion', count: 5 }],
+        flags: ['story_act3', 'aether_secret_known', 'ride_charizard'],
+        reputation: { aether: -15, researchers: 25, captains: 10 },
+      },
+    },
+    requiresFlags: ['akala_unlocked'],
+    unlocks: ['ub-01-first-contact'],
+    repeatable: false,
+  },
+  {
     id: 'ub-01-first-contact', name: 'Something Came Through',
     category: 'ultra-beast', island: 'ulaula', giver: 'npc:looker', recommendedLevel: 55,
     summary: 'The aurora over Ula’ula is not an aurora. Something is already on this side.',

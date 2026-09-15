@@ -86,6 +86,25 @@ export function buildTerrainMesh(
   let maxHeight = -Infinity;
   const biomesPresent = new Set<BiomeId>();
 
+  // ---- Height grid, with a one-cell border.
+  //
+  // Sampling heights into a grid first, then deriving normals from neighbours,
+  // replaces the five height evaluations per vertex that `terrain.sample()`
+  // would otherwise spend on finite differences. Profiling in the browser put
+  // a single LOD0 chunk at 225ms before this change; the grid pass makes the
+  // heights the only per-vertex terrain cost.
+  const gridDim = resolution + 3; // (resolution + 1) vertices plus a border.
+  const heights = new Float32Array(gridDim * gridDim);
+  for (let gz = 0; gz < gridDim; gz++) {
+    for (let gx = 0; gx < gridDim; gx++) {
+      const x = originX + (gx - 1) * step;
+      const z = originZ + (gz - 1) * step;
+      heights[gz * gridDim + gx] = terrain.sampleHeight(x, z);
+    }
+  }
+
+  const heightAt = (ix: number, iz: number): number => heights[(iz + 1) * gridDim + (ix + 1)];
+
   // ---- Grid vertices.
   for (let iz = 0; iz <= resolution; iz++) {
     for (let ix = 0; ix <= resolution; ix++) {
@@ -93,7 +112,19 @@ export function buildTerrainMesh(
       const x = originX + ix * step;
       const z = originZ + iz * step;
 
-      const sample = terrain.sample(x, z);
+      const height = heightAt(ix, iz);
+
+      // Central differences over the grid. The gradient's perpendicular is
+      // the surface normal; `2 * step` is the span between the two samples.
+      let nx = heightAt(ix - 1, iz) - heightAt(ix + 1, iz);
+      let ny = 2 * step;
+      let nz = heightAt(ix, iz - 1) - heightAt(ix, iz + 1);
+      const invLen = 1 / (Math.hypot(nx, ny, nz) || 1);
+      nx *= invLen;
+      ny *= invLen;
+      nz *= invLen;
+
+      const sample = terrain.sampleFrom(x, z, height, nx, ny, nz);
       const classification = classifier.classify(sample);
 
       const o3 = vi * 3;

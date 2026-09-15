@@ -60,6 +60,19 @@ export const SPAWN_TABLE: readonly SpawnEntry[] = [
   { species: 'LITTEN', weight: 3, levelRange: [8, 14], biomes: ['grassland', 'volcanic-slope'], hours: [...NIGHT_HOURS], alphaChance: 0.04 },
   { species: 'POPPLIO', weight: 3, levelRange: [8, 14], biomes: ['beach', 'reef'], hours: [...DAY_HOURS], alphaChance: 0.04 },
 
+  // ------------------------------------------------------- Towns and cities
+  // Towns previously held only nocturnal species, leaving them lifeless by
+  // day. These are the Pokémon that live comfortably alongside people.
+  { species: 'PIKIPEK', weight: 16, levelRange: [4, 12], biomes: ['town', 'city'], hours: [...DAY_HOURS] },
+  { species: 'WINGULL', weight: 20, levelRange: [5, 14], biomes: ['town', 'city'] },
+  { species: 'YUNGOOS', weight: 14, levelRange: [4, 12], biomes: ['town'], hours: [...DAY_HOURS] },
+  { species: 'PIKACHU', weight: 6, levelRange: [8, 16], biomes: ['town'], hours: [...DAY_HOURS] },
+  { species: 'MEOWTH_ALOLA', weight: 10, levelRange: [6, 15], biomes: ['town', 'city'], hours: [...DAY_HOURS] },
+  { species: 'GRUBBIN', weight: 12, levelRange: [5, 13], biomes: ['town', 'city'] },
+  { species: 'CRABRAWLER', weight: 8, levelRange: [6, 14], biomes: ['town'] },
+  { species: 'STOUTLAND', weight: 5, levelRange: [28, 38], biomes: ['city'], hours: [...DAY_HOURS] },
+  { species: 'ORICORIO', weight: 7, levelRange: [10, 18], biomes: ['town'], hours: [...DAY_HOURS] },
+
   // --------------------------------------------------------------- Aquatic
   { species: 'MAGIKARP', weight: 30, levelRange: [4, 14], biomes: ['ocean', 'river', 'lake', 'reef'] },
   { species: 'FINNEON', weight: 20, levelRange: [8, 18], biomes: ['ocean', 'reef'], hours: [...NIGHT_HOURS] },
@@ -111,6 +124,14 @@ export const SPAWN_TABLE: readonly SpawnEntry[] = [
   { species: 'MIMIKYU', weight: 5, levelRange: [32, 44], biomes: ['ruins', 'cave', 'facility'], hours: [...NIGHT_HOURS], alphaChance: 0.15 },
   { species: 'MIMIKYU', weight: 12, levelRange: [34, 46], biomes: ['ruins', 'facility'], weather: ['fog'], weatherBonus: 2.5, hours: [...NIGHT_HOURS] },
   { species: 'STOUTLAND', weight: 8, levelRange: [34, 46], biomes: ['desert', 'grassland', 'badlands'] },
+
+  // ------------------------------------------------------------------ Ruins
+  // The ruins previously held only nocturnal species, so a daytime visit to a
+  // Tapu shrine found nothing at all.
+  { species: 'GEODUDE_ALOLA', weight: 16, levelRange: [20, 34], biomes: ['ruins'] },
+  { species: 'ORICORIO', weight: 10, levelRange: [18, 30], biomes: ['ruins'], hours: [...DAY_HOURS] },
+  { species: 'MEOWTH_ALOLA', weight: 9, levelRange: [16, 28], biomes: ['ruins'] },
+  { species: 'CRABRAWLER', weight: 8, levelRange: [18, 30], biomes: ['ruins'] },
 
   // --------------------------------------------------- Poni: endgame frontier
   { species: 'KOMMO_O', weight: 3, levelRange: [52, 64], biomes: ['canyon', 'highland'], islands: ['poni'], alphaChance: 0.25 },
