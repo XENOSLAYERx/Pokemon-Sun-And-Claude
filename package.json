@@ -2,7 +2,7 @@
   "name": "project-alola",
   "version": "0.1.0",
   "private": true,
-  "description": "Project Alola — an open-world 3D reimagining of the Alola region. Headless deterministic simulation core + Three.js presentation layer.",
+  "description": "Project Alola \u2014 an open-world 3D reimagining of the Alola region. Headless deterministic simulation core + Three.js presentation layer.",
   "license": "UNLICENSED",
   "type": "module",
   "engines": {
@@ -14,9 +14,9 @@
     "tools/*"
   ],
   "scripts": {
-    "build": "tsc --build tsconfig.build.json",
-    "clean": "tsc --build tsconfig.build.json --clean && rm -rf packages/*/dist apps/*/dist",
-    "typecheck": "tsc --build tsconfig.build.json --pretty",
+    "build": "npm run build --workspace @alola/client",
+    "clean": "rm -rf apps/*/dist packages/*/dist",
+    "typecheck": "tsc --noEmit -p tsconfig.json --pretty",
     "test": "node --test --experimental-strip-types \"packages/*/test/*.test.ts\"",
     "test:watch": "node --test --watch --experimental-strip-types \"packages/*/test/*.test.ts\"",
     "sim": "node --experimental-strip-types tools/gen/headless-sim.ts",

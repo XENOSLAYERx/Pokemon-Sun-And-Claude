@@ -16,6 +16,9 @@ import {
   OCEAN_VERTEX_SHADER, OCEAN_FRAGMENT_SHADER, defaultOceanUniforms, MAX_OCEAN_WAVES,
 } from '../src/shaders/ocean.glsl.ts';
 import { SKY_VERTEX_SHADER, SKY_FRAGMENT_SHADER, defaultSkyUniforms } from '../src/shaders/sky.glsl.ts';
+import {
+  QUALITY_PRESETS, QUALITY_ORDER, AdaptiveQuality, detectQuality, isSoftwareRenderer,
+} from '../src/pipeline/quality.ts';
 
 const SEED = 20251115;
 const terrain = new TerrainGenerator(SEED);
@@ -439,5 +442,136 @@ describe('Shaders', () => {
   test('the sky shader bounds its raymarch loop', () => {
     assert.ok(SKY_FRAGMENT_SHADER.includes('const int STEPS'), 'cloud march must have a fixed step count');
     assert.ok(SKY_FRAGMENT_SHADER.includes('transmittance < 0.02'), 'should early-out when opaque');
+  });
+});
+
+// ---------------------------------------------------------------- quality
+
+describe('Graphics quality presets', () => {
+  test('every level in the order has a preset that names itself', () => {
+    assert.equal(QUALITY_ORDER.length, 5);
+    for (const level of QUALITY_ORDER) {
+      const preset = QUALITY_PRESETS[level];
+      assert.ok(preset, `missing preset for ${level}`);
+      assert.equal(preset.name, level, 'a preset must know its own level');
+      assert.ok(preset.label.length > 0);
+    }
+  });
+
+  test('cost rises monotonically across the order', () => {
+    // If a "higher" preset is cheaper in any dimension, stepping down under
+    // load can make the game slower, which is the opposite of the point.
+    const rising = [
+      'pixelRatio', 'renderScale', 'shadowMapSize', 'drawDistanceScale',
+      'chunkBuildsPerFrame', 'foliageDensity', 'maxVisiblePokemon',
+      'cloudSteps', 'oceanTessellation', 'oceanWaves',
+    ] as const;
+
+    for (let i = 1; i < QUALITY_ORDER.length; i++) {
+      const lower = QUALITY_PRESETS[QUALITY_ORDER[i - 1]];
+      const higher = QUALITY_PRESETS[QUALITY_ORDER[i]];
+      for (const key of rising) {
+        assert.ok(
+          higher[key] >= lower[key],
+          `${QUALITY_ORDER[i]}.${key} (${higher[key]}) must not be below ${QUALITY_ORDER[i - 1]}.${key} (${lower[key]})`,
+        );
+      }
+    }
+  });
+
+  test('every preset keeps a playable world, whatever it drops', () => {
+    for (const level of QUALITY_ORDER) {
+      const p = QUALITY_PRESETS[level];
+      assert.ok(p.renderScale > 0 && p.renderScale <= 1);
+      assert.ok(p.chunkBuildsPerFrame >= 1, 'a preset that builds no chunks never loads the world');
+      assert.ok(p.drawDistanceScale > 0);
+      // Simulation is ~0.33us per agent — cutting Pokémon below this buys
+      // nothing and costs the thing the world is for.
+      assert.ok(p.maxVisiblePokemon >= 40, `${level} renders too few Pokémon to feel alive`);
+      assert.ok(p.oceanWaves >= 3, 'fewer than three Gerstner waves stops reading as ocean');
+    }
+  });
+
+  test('software renderers are recognised, hardware ones are not', () => {
+    for (const s of [
+      'Google SwiftShader',
+      'Mesa/X.org, llvmpipe (LLVM 15.0.7, 256 bits)',
+      'softpipe',
+      'Microsoft Basic Render Driver',
+    ]) {
+      assert.ok(isSoftwareRenderer(s), `${s} should be detected as software`);
+    }
+    for (const s of [
+      'ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Direct3D11 vs_5_0 ps_5_0)',
+      'Apple M2 Pro',
+      'AMD Radeon RX 6700 XT',
+    ]) {
+      assert.ok(!isSoftwareRenderer(s), `${s} should be treated as hardware`);
+    }
+  });
+
+  test('detection falls back to potato without a GPU, and finds the Deck', () => {
+    assert.equal(detectQuality({ rendererString: 'Google SwiftShader' }), 'potato');
+    assert.equal(
+      detectQuality({ rendererString: 'AMD Custom GPU 0405', hardwareConcurrency: 8, deviceMemoryGb: 16, screenWidth: 1280 }),
+      'medium',
+      'the Steam Deck reports 8 cores and a 1280-wide screen',
+    );
+    assert.equal(
+      detectQuality({ rendererString: 'NVIDIA GeForce RTX 4090', hardwareConcurrency: 16, deviceMemoryGb: 32, screenWidth: 3840 }),
+      'ultra',
+    );
+    assert.equal(
+      detectQuality({ rendererString: 'Mali-G57', hardwareConcurrency: 2, deviceMemoryGb: 3, screenWidth: 1080 }),
+      'low',
+    );
+  });
+
+  test('adaptive quality drops fast and recovers slowly', () => {
+    const changes: string[] = [];
+    const adaptive = new AdaptiveQuality('high', 60);
+    adaptive.onChange = (p) => changes.push(p.name);
+
+    // A steady 20fps: below target, but it must take about a second to react.
+    for (let i = 0; i < 60; i++) adaptive.update(50);
+    assert.equal(adaptive.current, 'high', 'must not drop on a brief hitch');
+    adaptive.update(50);
+    assert.equal(adaptive.current, 'medium');
+
+    // Comfortable headroom takes much longer to earn a step back up.
+    for (let i = 0; i < 300; i++) adaptive.update(6);
+    assert.equal(adaptive.current, 'medium', 'must not raise on a short quiet stretch');
+    adaptive.update(6);
+    assert.equal(adaptive.current, 'high');
+
+    assert.deepEqual(changes, ['medium', 'high']);
+  });
+
+  test('a frame near target neither raises nor lowers', () => {
+    const adaptive = new AdaptiveQuality('medium', 60);
+    for (let i = 0; i < 1000; i++) adaptive.update(17);
+    assert.equal(adaptive.current, 'medium');
+  });
+
+  test('the order has ends, and adaptation stops at them', () => {
+    const lowest = new AdaptiveQuality('potato', 60);
+    for (let i = 0; i < 500; i++) lowest.update(500);
+    assert.equal(lowest.current, 'potato');
+
+    const highest = new AdaptiveQuality('ultra', 60);
+    for (let i = 0; i < 2000; i++) highest.update(1);
+    assert.equal(highest.current, 'ultra');
+  });
+
+  test('an explicit player choice stops adaptation', () => {
+    const adaptive = new AdaptiveQuality('high', 60);
+    adaptive.lock('low');
+    assert.equal(adaptive.current, 'low');
+    for (let i = 0; i < 2000; i++) adaptive.update(1);
+    assert.equal(adaptive.current, 'low', 'a settings screen must not override the player');
+
+    adaptive.unlock();
+    for (let i = 0; i < 301; i++) adaptive.update(6);
+    assert.equal(adaptive.current, 'medium', 'adaptation resumes once unlocked');
   });
 });

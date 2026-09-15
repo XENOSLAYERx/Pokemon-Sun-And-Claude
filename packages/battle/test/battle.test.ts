@@ -638,6 +638,48 @@ describe('Battle engine', () => {
     assert.ok(seen.size > 1, 'hit count should vary');
   });
 
+  test('a fixed-damage move halves current HP and ignores the damage formula', () => {
+    // Nature's Madness has `power: null`, which routes it around the whole
+    // damage chain. The branch that does this was briefly unreachable during
+    // development, and the move quietly dealt 1 damage instead of halving HP.
+    let hits = 0;
+
+    for (const attackerLevel of [5, 50, 100]) {
+      const state = makeState({
+        playerTeam: [{ species: 'ROWLET', level: attackerLevel, moves: ['nature-s-madness'] }],
+        foeTeam: [{ species: 'LAPRAS', level: 70, moves: ['protect'] }],
+      });
+      const userId = state.sides[0].active[0];
+      const foe = state.pokemon.get(state.sides[1].active[0])!;
+
+      // Accuracy is 90, so sweep seeds and assert on every connecting hit.
+      for (let seed = 1; seed <= 20; seed++) {
+        const engine = new BattleEngine(state, { seed });
+        foe.hp = foe.maxHp;
+        foe.fainted = false;
+        state.ended = false;
+        state.winner = null;
+
+        const before = foe.hp;
+        const events = engine.executeTurn([
+          { kind: 'move', pokemonId: userId, moveId: 'nature-s-madness', targetId: foe.id },
+        ]);
+        const dmg = findEvent(events, 'damage');
+        if (!dmg) continue;
+
+        hits++;
+        assert.equal(
+          before - foe.hp,
+          Math.floor(before / 2),
+          `attacker level ${attackerLevel} should always remove exactly half the target's HP`,
+        );
+        assert.equal(dmg.effectiveness, 1, 'fixed damage is never type-modified');
+      }
+    }
+
+    assert.ok(hits > 0, 'Nature\'s Madness should connect at least once across the seed sweep');
+  });
+
   test('weather is set by moves and expires on schedule', () => {
     const state = makeState({
       // A bulky foe at a much higher level, so the battle cannot end before

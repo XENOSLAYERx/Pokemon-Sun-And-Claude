@@ -52,9 +52,14 @@ export type ServerMessage =
  * A delta-encoded entity update.
  *
  * Fields are optional: the server only sends what changed since the client's
- * acknowledged baseline. At 20Hz with 60 visible entities, sending full state
- * is roughly 40 KB/s per client; delta encoding brings that under 6 KB/s,
- * which is the difference between viable and not on a mobile connection.
+ * acknowledged baseline, and an entity whose `version` did not change is not
+ * sent at all.
+ *
+ * Measured by the server selftest at 20Hz: 28.5 entities per snapshot,
+ * 51.6 KB/s per client as uncompressed JSON. A packed binary encoder over this
+ * same `fields` bitmask is what takes that to the sub-10 KB/s a mobile
+ * connection wants — it is not written yet, so do not quote that figure as
+ * though it were.
  */
 export interface EntityDelta {
   /** Entity id. */
