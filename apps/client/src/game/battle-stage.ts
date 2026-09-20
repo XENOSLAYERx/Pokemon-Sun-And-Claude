@@ -10,13 +10,14 @@
  * the simulation produced.
  */
 import {
-  Scene, Mesh, CapsuleGeometry, MeshStandardMaterial, Vector3, PerspectiveCamera, Group,
-  RingGeometry, MeshBasicMaterial, DoubleSide,
+  Scene, Mesh, Object3D, Box3, CapsuleGeometry, MeshStandardMaterial, Vector3, PerspectiveCamera,
+  Group, RingGeometry, MeshBasicMaterial, DoubleSide,
 } from 'three';
 import { getSpecies } from '@alola/data';
 import { cameraRigFor, type BattleArena } from '@alola/battle';
 import { frameBattle } from '@alola/render';
 import type { BattleSession } from '@alola/game';
+import { loadPokemonModel } from './pokemon-models.ts';
 
 const TYPE_COLORS: Record<string, number> = {
   normal: 0xa8a878, fire: 0xf08030, water: 0x6890f0, electric: 0xf8d030,
@@ -35,7 +36,8 @@ const RIG_PITCH: Record<string, number> = {
   'confined': 0.22,
 };
 
-function meshFor(speciesId: string, scale: number): Mesh {
+/** The placeholder shown immediately, and permanently for any species with no model. */
+function capsuleFor(speciesId: string, scale: number): Mesh {
   const species = getSpecies(speciesId);
   const height = Math.max(0.3, Math.min(6, species.height)) * scale;
   const radius = Math.max(0.14, Math.min(Math.cbrt(species.weight) * 0.055, height * 0.42));
@@ -50,6 +52,7 @@ function meshFor(speciesId: string, scale: number): Mesh {
   mesh.castShadow = true;
   mesh.userData.height = height;
   mesh.userData.radius = radius;
+  mesh.userData.disposable = true;
   return mesh;
 }
 
@@ -61,8 +64,8 @@ export interface StagedCamera {
 export class BattleStage {
   private readonly scene: Scene;
   private readonly group = new Group();
-  private playerMon: Mesh | null = null;
-  private foeMon: Mesh | null = null;
+  private playerMon: Object3D | null = null;
+  private foeMon: Object3D | null = null;
   private arena: BattleArena | null = null;
   private axis = new Vector3(1, 0, 0);
 
@@ -98,8 +101,8 @@ export class BattleStage {
 
     const centre = new Vector3(arena.x, arena.y, arena.z);
 
-    this.playerMon = meshFor(session.playerActive.speciesId, session.playerActive.scale);
-    this.foeMon = meshFor(session.foeActive.speciesId, session.foeActive.scale);
+    this.playerMon = capsuleFor(session.playerActive.speciesId, session.playerActive.scale);
+    this.foeMon = capsuleFor(session.foeActive.speciesId, session.foeActive.scale);
 
     // Separation scales with the combatants, not with the arena. A fixed 9m
     // gap reads fine for a Totem and leaves two 0.4m Pokemon as specks in the
@@ -111,7 +114,7 @@ export class BattleStage {
     );
     const separation = Math.min(Math.max(largest * 4.5, 2.6), arena.radius * 0.78, 14);
 
-    const place = (mesh: Mesh, sign: number): void => {
+    const place = (mesh: Object3D, sign: number): void => {
       mesh.position.copy(centre).addScaledVector(this.axis, sign * separation * 0.5);
       mesh.position.y = arena.y + (mesh.userData.height as number) / 2;
       // Face the opponent.
@@ -124,27 +127,82 @@ export class BattleStage {
       );
       ring.rotation.x = -Math.PI / 2;
       ring.position.set(mesh.position.x, arena.y + 0.03, mesh.position.z);
+      ring.userData.disposable = true;
       this.group.add(ring);
     };
 
     place(this.playerMon, -1);
     place(this.foeMon, 1);
+    this.applyModel('player', session.playerActive.speciesId, this.playerMon);
+    this.applyModel('foe', session.foeActive.speciesId, this.foeMon);
     this.group.visible = true;
+  }
+
+  /**
+   * Swap a placeholder capsule for its real model, if one exists.
+   *
+   * The capsule is already placed and visible by the time this resolves, so
+   * a slow or missing fetch never delays the battle — it just leaves the
+   * capsule up. `placeholder` is captured by reference: if a switch, a
+   * faint, or `end()` has since moved the slot on to something else, this
+   * silently drops the now-stale swap instead of clobbering it.
+   */
+  private applyModel(target: 'player' | 'foe', speciesId: string, placeholder: Object3D): void {
+    loadPokemonModel(speciesId).then((scene) => {
+      if (!scene) return;
+      const current = target === 'player' ? this.playerMon : this.foeMon;
+      if (current !== placeholder) return;
+
+      const height = placeholder.userData.height as number;
+      const radius = placeholder.userData.radius as number;
+
+      const size = new Box3().setFromObject(scene).getSize(new Vector3());
+      if (size.y > 0) scene.scale.multiplyScalar(height / size.y);
+      // Re-centre so the wrapper's origin sits at the model's midpoint, the
+      // same convention the capsule uses — everything else here positions by
+      // that assumption.
+      scene.position.sub(new Box3().setFromObject(scene).getCenter(new Vector3()));
+
+      const wrapper = new Group();
+      wrapper.add(scene);
+      wrapper.userData.height = height;
+      wrapper.userData.radius = radius;
+      wrapper.position.copy(placeholder.position);
+      wrapper.rotation.y = placeholder.rotation.y;
+      wrapper.traverse((child) => {
+        if ((child as Mesh).isMesh) child.castShadow = true;
+      });
+
+      this.group.remove(placeholder);
+      this.disposeIfOwned(placeholder);
+      this.group.add(wrapper);
+
+      if (target === 'player') this.playerMon = wrapper;
+      else this.foeMon = wrapper;
+    });
+  }
+
+  /** Only frees resources this stage created itself — a loaded model's are cache-owned. */
+  private disposeIfOwned(obj: Object3D): void {
+    if (!obj.userData.disposable) return;
+    const mesh = obj as Mesh;
+    mesh.geometry?.dispose();
+    (mesh.material as MeshStandardMaterial | undefined)?.dispose();
   }
 
   /** Swap the player's combatant model, after a switch or a faint. */
   setPlayerSpecies(speciesId: string, scale: number): void {
     if (!this.playerMon || !this.arena) return;
     const old = this.playerMon;
-    const replacement = meshFor(speciesId, scale);
+    const replacement = capsuleFor(speciesId, scale);
     replacement.position.copy(old.position);
     replacement.position.y = this.arena.y + (replacement.userData.height as number) / 2;
     replacement.rotation.y = old.rotation.y;
     this.group.remove(old);
-    old.geometry.dispose();
-    (old.material as MeshStandardMaterial).dispose();
+    this.disposeIfOwned(old);
     this.group.add(replacement);
     this.playerMon = replacement;
+    this.applyModel('player', speciesId, replacement);
   }
 
   /**
@@ -209,10 +267,7 @@ export class BattleStage {
   end(): void {
     for (const child of [...this.group.children]) {
       this.group.remove(child);
-      const mesh = child as Mesh;
-      mesh.geometry?.dispose();
-      const material = mesh.material as MeshStandardMaterial | undefined;
-      material?.dispose();
+      this.disposeIfOwned(child);
     }
     this.group.visible = false;
     this.playerMon = null;
