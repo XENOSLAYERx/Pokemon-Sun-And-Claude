@@ -178,10 +178,23 @@ automatically.
 
 ## 9. What the prototype does
 
-Transform animation only: position from steering, yaw from the AI's chosen
-heading, no skeletal animation at all. Pokémon are capsules.
+Rigid-bone animation in the vertex shader. Each model is built with up to
+twelve bones (root, head, four legs, tail, wings, arms, ear), and each vertex
+records which bone it belongs to. Each bone has a pivot, an axis and one of four
+motions — walk, sway, flap or none — and the shader rotates it from a
+per-instance walk cycle, gait and idle phase
+(`packages/render/src/creatures/material.ts`). There are no clips and no
+skinning: a herd of forty walking Pokémon is one draw call and zero CPU
+animation work. Shadows use a matching depth material so they animate too.
 
-That was sufficient for its purpose — observing and tuning AI behaviour — and
-the separation holds: the AI writes `position`, `yaw` and a goal, and an
-animation system consumes exactly those. Nothing in `packages/ai` needs to
-change when real animation arrives.
+Gait comes from the simulation: the crowd compares a Pokémon's speed with its
+species' walking pace and eases between idle, walk and run, and the stride rate
+scales with body size. Battle adds lunge, flinch and faint on top, driven by the
+turn results. Fliers hover and flap; swimmers sway.
+
+The separation this document asks for holds: the AI writes `position`, `yaw`
+and a goal, and animation consumes exactly those. Nothing in `packages/ai`
+changed when the models arrived.
+
+A `.glb` dropped in to replace a model can bring real skeletal clips: anything
+named *idle*, *walk* or *run* is blended by the same gait.

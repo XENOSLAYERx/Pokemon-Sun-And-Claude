@@ -259,4 +259,5 @@ a capture, the pause menu, a save, and a reload that restores the run.
   evolve.
 - **No shops, no healing stations.** "Rest" in the menu is a placeholder for a
   Pokémon Centre.
-- **No art.** Every Pokémon is a capsule coloured by its primary type.
+- **No authored art.** Every Pokémon and the player are procedural models built
+  in code (see `15-art-pipeline.md` §2); `.glb` files can replace them.

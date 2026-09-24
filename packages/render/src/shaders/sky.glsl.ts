@@ -46,6 +46,13 @@ export const SKY_FRAGMENT_SHADER = /* glsl */ `
   uniform float uStarIntensity;   // Rises as daylight falls.
   uniform float uAuroraIntensity; // Ultra Beast events raise this.
 
+  // Raymarch budget, from the quality preset. 0 disables clouds entirely.
+  uniform int uCloudSteps;
+  // Samples toward the sun per step, 1-3.
+  uniform int uLightSteps;
+  // Hard ceiling, so the loop has a compile-time bound on every driver.
+  const int MAX_CLOUD_STEPS = 48;
+
   // --- Hash / value noise. Cheap, and adequate for cloud shape.
   float hash(vec3 p) {
     p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3));
@@ -74,6 +81,36 @@ export const SKY_FRAGMENT_SHADER = /* glsl */ `
       amp *= 0.5;
     }
     return sum;
+  }
+
+  /** Three octaves: the light march only needs the broad shape of the cloud. */
+  float fbmLow(vec3 p) {
+    float sum = 0.0;
+    float amp = 0.5;
+    for (int i = 0; i < 3; i++) {
+      sum += valueNoise(p) * amp;
+      p *= 2.02;
+      amp *= 0.5;
+    }
+    return sum;
+  }
+
+  float shapeDensity(vec3 p, float base) {
+    // Coverage carves the noise field: low coverage leaves only the densest
+    // peaks, which reads as scattered cumulus rather than uniform haze.
+    float coverage = 1.0 - uCloudCoverage;
+    float d = smoothstep(coverage, coverage + 0.25, base);
+
+    // Vertical falloff so the slab has soft tops and flat-ish bases.
+    float heightFrac = clamp((p.y - uCloudHeight) / uCloudThickness, 0.0, 1.0);
+    float shape = smoothstep(0.0, 0.18, heightFrac) * smoothstep(1.0, 0.55, heightFrac);
+
+    return d * shape * uCloudDensity;
+  }
+
+  /** Cheaper density for the light march toward the sun. */
+  float cloudDensityLow(vec3 p) {
+    return shapeDensity(p, fbmLow(p * 0.0012 + uWindOffset * 0.0008));
   }
 
   /** Cloud density at a point in the slab. */
@@ -129,20 +166,19 @@ export const SKY_FRAGMENT_SHADER = /* glsl */ `
     }
 
     // --- Clouds: raymarch the slab, but only for rays that can reach it.
-    if (dir.y > 0.02 && uCloudCoverage > 0.01) {
+    if (uCloudSteps > 0 && dir.y > 0.02 && uCloudCoverage > 0.01) {
       float tStart = (uCloudHeight - cameraPosition.y) / dir.y;
       float tEnd = (uCloudHeight + uCloudThickness - cameraPosition.y) / dir.y;
 
       if (tEnd > 0.0) {
         tStart = max(tStart, 0.0);
-        const int STEPS = 24;
-        float stepSize = (tEnd - tStart) / float(STEPS);
+        float stepSize = (tEnd - tStart) / float(uCloudSteps);
 
         float transmittance = 1.0;
         vec3 scattered = vec3(0.0);
 
-        for (int i = 0; i < STEPS; i++) {
-          if (transmittance < 0.02) break;
+        for (int i = 0; i < MAX_CLOUD_STEPS; i++) {
+          if (i >= uCloudSteps || transmittance < 0.02) break;
           vec3 p = cameraPosition + dir * (tStart + stepSize * float(i));
           float density = cloudDensity(p);
           if (density <= 0.001) continue;
@@ -150,8 +186,12 @@ export const SKY_FRAGMENT_SHADER = /* glsl */ `
           // Single-scatter lighting: one short march toward the sun.
           float lightDensity = 0.0;
           for (int j = 1; j <= 3; j++) {
-            lightDensity += cloudDensity(p - uSunDirection * float(j) * 120.0);
+            if (j > uLightSteps) break;
+            lightDensity += cloudDensityLow(p - uSunDirection * float(j) * 120.0);
           }
+          // Fewer light samples see less cloud; rescale so lighting keeps the
+          // same overall darkness whatever the preset.
+          lightDensity *= 3.0 / float(max(uLightSteps, 1));
           float lightTransmittance = exp(-lightDensity * 0.6);
 
           // Henyey-Greenstein forward scattering gives clouds their bright
@@ -193,5 +233,18 @@ export function defaultSkyUniforms(): Record<string, { value: unknown }> {
     uTime: { value: 0 },
     uStarIntensity: { value: 0 },
     uAuroraIntensity: { value: 0 },
+    uCloudSteps: { value: 16 },
+    uLightSteps: { value: 2 },
   };
+}
+
+/**
+ * Light samples per cloud step for a given step budget. The light march is
+ * the inner loop, so it is where a low preset saves the most.
+ */
+export function lightStepsFor(cloudSteps: number): number {
+  if (cloudSteps <= 0) return 0;
+  if (cloudSteps <= 8) return 1;
+  if (cloudSteps <= 24) return 2;
+  return 3;
 }

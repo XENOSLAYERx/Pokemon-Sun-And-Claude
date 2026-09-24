@@ -1,7 +1,7 @@
 # Art Pipeline
 
 **Document owner:** Technical Artist, with Environment and Character Art
-**Status:** Specification. The prototype uses procedural placeholders.
+**Status:** Specification. The prototype uses procedural models, described in §2.
 
 ---
 
@@ -21,9 +21,19 @@ does effortlessly, and makes a 40km world look flat.
 
 Stated plainly so the gap is legible:
 
-- **Pokémon:** procedural capsules, sized from real height and weight, tinted by
-  primary type. Enough to distinguish species and observe AI behaviour, which is
-  what the prototype needed.
+- **Pokémon:** a procedural model for each of the 53 species
+  (`packages/render/src/creatures/species/`), assembled in code from ellipsoids,
+  tapered limbs and extruded shapes, coloured per vertex from the species'
+  palette and sized from its real height. Toon-shaded with a rim light and an
+  ink outline, which suits the stylised half of §1 and needs no textures. Two
+  LODs: ~2,300 triangles on average up close (3,634 at most, Guzzlord), ~610 far
+  away — well inside the small-Pokémon LOD2 budget below.
+- **Player:** built from the character creator's choices — skin, hair, eyes,
+  body type, height and every clothing item — about 2,000 triangles.
+- **Replaceable.** Any species or the player can be swapped for a `.glb` file
+  without touching code; see `apps/client/public/models/README.md`.
+  `npm run models:export` writes the built-in models out as a starting point
+  for Blender. `/models.html` in the dev server shows every model on a turntable.
 - **Terrain:** vertex-coloured standard material using biome ground colours. The
   full splat shader is written and tested for uniform completeness but needs
   texture arrays the asset pipeline would produce.

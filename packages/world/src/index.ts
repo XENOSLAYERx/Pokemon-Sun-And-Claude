@@ -17,6 +17,7 @@ export type { BiomeClassification } from './biome/classifier.ts';
 
 export {
   ChunkStreamer,
+  BUILD_PENDING,
   ChunkState,
   CHUNK_SIZE,
   LOD_RESOLUTIONS,

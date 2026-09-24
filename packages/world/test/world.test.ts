@@ -5,6 +5,7 @@ import { BiomeClassifier } from '../src/biome/classifier.ts';
 import {
   ChunkStreamer, ChunkState, CHUNK_SIZE, LOD_RADII, MAX_LOD,
   chunkKey, chunkCoordX, chunkCoordZ, worldToChunk, chunkCenter,
+  BUILD_PENDING,
 } from '../src/streaming/chunks.ts';
 import type { ChunkRecord } from '../src/streaming/chunks.ts';
 import { TimeOfDay, ambientColorFor } from '../src/timeofday/cycle.ts';
@@ -277,6 +278,158 @@ describe('Chunk streaming', () => {
     streamer.clear(() => { disposed++; });
     assert.ok(disposed > 0, 'clear must dispose payloads');
     assert.equal(streamer.chunkCount, 0);
+  });
+});
+
+describe('Asynchronous chunk streaming', () => {
+  const origin = [{ x: 0, z: 0 }];
+
+  test('a pending build stays Building and keeps its previous payload', () => {
+    const streamer = new ChunkStreamer({ buildsPerTick: 4, maxInFlight: 64 });
+    streamer.setObservers(origin);
+    const dispatched: ChunkRecord[] = [];
+    streamer.update(0, (rec) => { dispatched.push(rec); return BUILD_PENDING; }, () => {});
+
+    assert.equal(dispatched.length, 4);
+    assert.equal(streamer.stats.inFlight, 4);
+    for (const rec of dispatched) {
+      assert.equal(rec.state, ChunkState.Building);
+      assert.equal(rec.payload, null, 'no payload attached until the worker answers');
+    }
+  });
+
+  test('completion attaches the payload and marks the chunk ready', () => {
+    const streamer = new ChunkStreamer({ buildsPerTick: 1 });
+    streamer.setObservers(origin);
+    let rec!: ChunkRecord;
+    streamer.update(0, (r) => { rec = r; return BUILD_PENDING; }, () => {});
+
+    const used = streamer.complete(rec.key, rec.lod, 'mesh', 1, () => {});
+    assert.ok(used);
+    assert.equal(rec.state, ChunkState.Ready);
+    assert.equal(rec.payload, 'mesh');
+    assert.equal(streamer.stats.inFlight, 0, 'the stat must reflect the completion immediately');
+  });
+
+  test('in-flight builds are capped, so a backlog cannot pile up', () => {
+    const streamer = new ChunkStreamer({ buildsPerTick: 10, maxInFlight: 3 });
+    streamer.setObservers(origin);
+    let dispatched = 0;
+    for (let t = 0; t < 5; t++) {
+      streamer.update(t, () => { dispatched++; return BUILD_PENDING; }, () => {});
+    }
+    assert.equal(dispatched, 3, 'nothing more is dispatched until something completes');
+  });
+
+  test('a result for an unloaded chunk is disposed, not attached', () => {
+    const streamer = new ChunkStreamer({ buildsPerTick: 1, unloadGraceSeconds: 0, unloadsPerTick: 10_000 });
+    streamer.setObservers(origin);
+    let rec!: ChunkRecord;
+    streamer.update(0, (r) => { rec = r; return BUILD_PENDING; }, () => {});
+
+    // The player teleports far away; the chunk ages out while its build is out.
+    streamer.setObservers([{ x: 500_000, z: 500_000 }]);
+    streamer.update(100, () => BUILD_PENDING, () => {});
+    assert.equal(streamer.get(rec.cx, rec.cz), undefined, 'the chunk was unloaded');
+
+    const disposed: unknown[] = [];
+    const used = streamer.complete(rec.key, rec.lod, 'late-mesh', 101, (r) => disposed.push(r.payload));
+    assert.equal(used, false);
+    assert.deepEqual(disposed, ['late-mesh'], 'a late result must be released, or it leaks GPU memory');
+    assert.equal(streamer.stats.discarded, 1);
+  });
+
+  test('a stale LOD is discarded, so the ground under the player is never low-detail', () => {
+    const streamer = new ChunkStreamer({ buildsPerTick: 1_000, maxInFlight: 10_000 });
+    // Start far away so the chunk at the origin is dispatched at a coarse LOD.
+    streamer.setObservers([{ x: 3000, z: 0 }]);
+    streamer.update(0, () => BUILD_PENDING, () => {});
+    const target = streamer.get(0, 0)!;
+    const coarse = target.lod;
+    assert.ok(coarse > 0, `expected a coarse LOD at 3km, got ${coarse}`);
+
+    // The player arrives before the worker answers.
+    streamer.setObservers([{ x: CHUNK_SIZE / 2, z: CHUNK_SIZE / 2 }]);
+    streamer.update(1, () => BUILD_PENDING, () => {});
+    assert.equal(target.lod, 0, 'the chunk is re-queued and re-dispatched at full detail');
+
+    const disposed: unknown[] = [];
+    assert.equal(streamer.wants(chunkKey(0, 0), coarse), false, 'no mesh should even be built for the stale LOD');
+    assert.equal(streamer.wants(chunkKey(0, 0), 0), true);
+    const usedStale = streamer.complete(chunkKey(0, 0), coarse, 'coarse-mesh', 2, (r) => disposed.push(r.payload));
+    assert.equal(usedStale, false, 'the coarse result arrived late and must not be attached');
+    assert.deepEqual(disposed, ['coarse-mesh']);
+
+    const usedFine = streamer.complete(chunkKey(0, 0), 0, 'fine-mesh', 3, () => {});
+    assert.ok(usedFine);
+    assert.equal(target.payload, 'fine-mesh');
+    assert.equal(target.state, ChunkState.Ready);
+  });
+
+  test('a LOD rebuild keeps the old mesh visible until the new one lands', () => {
+    const streamer = new ChunkStreamer({ buildsPerTick: 1_000, maxInFlight: 10_000 });
+    streamer.setObservers([{ x: CHUNK_SIZE / 2, z: CHUNK_SIZE / 2 }]);
+    streamer.update(0, () => BUILD_PENDING, () => {});
+    const rec = streamer.get(0, 0)!;
+    streamer.complete(rec.key, rec.lod, 'lod0', 1, () => {});
+
+    // Walk far enough that this chunk drops a LOD.
+    streamer.setObservers([{ x: 1400, z: CHUNK_SIZE / 2 }]);
+    const disposed: unknown[] = [];
+    streamer.update(2, () => BUILD_PENDING, (r) => disposed.push(r.payload));
+    assert.ok(rec.lod > 0);
+    assert.equal(rec.payload, 'lod0', 'the old mesh stays until its replacement is ready — no holes');
+    assert.equal(disposed.length, 0);
+
+    streamer.complete(rec.key, rec.lod, 'lod1', 3, (r) => disposed.push(r.payload));
+    assert.equal(rec.payload, 'lod1');
+    assert.deepEqual(disposed, ['lod0'], 'and is released the moment it is replaced');
+  });
+
+  test('covered radius grows from nothing as chunks land', () => {
+    const streamer = new ChunkStreamer({ buildsPerTick: 10_000, maxInFlight: 100_000 });
+    streamer.setObservers(origin);
+    const dispatched: ChunkRecord[] = [];
+    streamer.update(0, (r) => { dispatched.push(r); return BUILD_PENDING; }, () => {});
+    assert.equal(streamer.stats.coveredRadius, 0, 'nothing is on screen yet, so far terrain must cover everything');
+
+    // Land every chunk: coverage reaches the full radius.
+    for (const r of dispatched) streamer.complete(r.key, r.lod, 'mesh', 1, () => {});
+    streamer.update(2, () => BUILD_PENDING, () => {});
+    assert.equal(streamer.stats.coveredRadius, streamer.streamingRadius);
+  });
+
+  test('a chunk rebuilding at a new LOD still counts as covered', () => {
+    const streamer = new ChunkStreamer({ buildsPerTick: 10_000, maxInFlight: 100_000 });
+    streamer.setObservers([{ x: CHUNK_SIZE / 2, z: CHUNK_SIZE / 2 }]);
+    const dispatched: ChunkRecord[] = [];
+    streamer.update(0, (r) => { dispatched.push(r); return BUILD_PENDING; }, () => {});
+    for (const r of dispatched) streamer.complete(r.key, r.lod, 'mesh', 1, () => {});
+
+    // Move so that some chunks change LOD and go back to Building.
+    streamer.setObservers([{ x: 1400, z: CHUNK_SIZE / 2 }]);
+    streamer.update(2, () => BUILD_PENDING, () => {});
+    assert.ok(streamer.stats.building > 0, 'the move should have triggered rebuilds');
+    // New chunks entering range have nothing yet, but the rebuilding ones do.
+    const rebuildingWithMesh = [...streamer.loadedChunks()].filter(
+      (r) => r.state === ChunkState.Building && r.payload !== null,
+    );
+    assert.ok(rebuildingWithMesh.length > 0);
+    assert.ok(streamer.stats.coveredRadius > 0, 'old meshes on screen keep the far terrain cut out');
+  });
+
+  test('draw distance scales every ring', () => {
+    const near = new ChunkStreamer({ radiusScale: 0.5 });
+    const full = new ChunkStreamer({ radiusScale: 1 });
+    assert.equal(near.streamingRadius, LOD_RADII[LOD_RADII.length - 1] * 0.5);
+    assert.ok(near.lodFor(LOD_RADII[0] * 0.9) > full.lodFor(LOD_RADII[0] * 0.9),
+      'a halved draw distance reaches the coarser LODs sooner');
+
+    near.setObservers(origin);
+    full.setObservers(origin);
+    near.update(0, () => 'x', () => {});
+    full.update(0, () => 'x', () => {});
+    assert.ok(near.chunkCount < full.chunkCount, `${near.chunkCount} chunks at half distance vs ${full.chunkCount}`);
   });
 });
 

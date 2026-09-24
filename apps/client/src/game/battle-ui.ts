@@ -36,6 +36,8 @@ export interface BattleUiCallbacks {
   onFinished(session: BattleSession, outcome: TurnResult['outcome']): void;
   /** Play an audio cue. */
   onCue?(cue: string): void;
+  /** A turn resolved — the stage animates it from the same events. */
+  onTurn?(session: BattleSession, result: TurnResult): void;
 }
 
 export class BattleUi {
@@ -358,6 +360,7 @@ export class BattleUi {
     const session = this.session!;
     this.log(result.messages, true);
     this.renderPlates();
+    this.callbacks.onTurn?.(session, result);
 
     if (result.capture?.caught) this.callbacks.onCue?.('capture');
     if (result.levelUps.length > 0) this.callbacks.onCue?.('level-up');

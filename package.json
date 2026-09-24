@@ -6,7 +6,7 @@
   "license": "UNLICENSED",
   "type": "module",
   "engines": {
-    "node": ">=20.11"
+    "node": ">=22.6"
   },
   "workspaces": [
     "packages/*",
@@ -14,7 +14,7 @@
     "tools/*"
   ],
   "scripts": {
-    "build": "npm run build --workspace @alola/client",
+    "build": "npm run build --workspace @alola/client --",
     "clean": "rm -rf apps/*/dist packages/*/dist",
     "typecheck": "tsc --noEmit -p tsconfig.json --pretty",
     "test": "node --test --experimental-strip-types \"packages/*/test/*.test.ts\"",
@@ -22,8 +22,9 @@
     "sim": "node --experimental-strip-types tools/gen/headless-sim.ts",
     "validate:content": "node --experimental-strip-types tools/content/validate.ts",
     "bake:content": "node --experimental-strip-types tools/content/bake.ts",
-    "dev": "npm run dev --workspace @alola/client",
-    "dev:server": "npm run dev --workspace @alola/server"
+    "models:export": "node --experimental-strip-types tools/models/export-glb.ts",
+    "dev": "npm run dev --workspace @alola/client --",
+    "dev:server": "npm run dev --workspace @alola/server --"
   },
   "devDependencies": {
     "@types/node": "^22.20.2",

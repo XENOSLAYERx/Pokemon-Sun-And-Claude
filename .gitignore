@@ -15,3 +15,6 @@ coverage/
 # Local verification harnesses (Playwright, not part of the build)
 _verify-client.mjs
 _shot.mjs
+
+# Models exported by `npm run models:export`
+/exports/

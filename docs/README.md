@@ -88,7 +88,7 @@ answer cost.
 |---|---|
 | Packages | 12 (`@alola/core` … `@alola/ui`) + client, server, tools |
 | TypeScript | 27,609 lines across 99 files |
-| Tests | **504 passing**, ~2s, no browser and no build step |
+| Tests | **553 passing**, ~2s, no browser and no build step |
 | Species | 53, with battle stats *and* overworld behaviour fields |
 | Moves | 50, plus 14 Z-Moves with pose, camera beats and environment reactions |
 | Biomes | 28, across 5 islands |
@@ -105,7 +105,7 @@ quest 18 · save 18 · net 29 · audio 17 · render 43 · ui 32.
 
 ```bash
 npm install
-npm test                  # 504 tests, no browser required
+npm test                  # 553 tests, no browser required
 npm run typecheck         # tsc --noEmit, strict, erasableSyntaxOnly
 npm run validate:content  # referential integrity across every content table
 npm run sim               # headless simulation harness with timings
