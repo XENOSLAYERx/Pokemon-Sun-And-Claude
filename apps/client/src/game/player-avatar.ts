@@ -14,6 +14,7 @@ import {
   buildPlayerModel, humanoidHeight, createCreatureMaterials, instancedCopy, buildCreature, strideFor,
   type HumanoidLook, type CreatureMaterials,
 } from '@alola/render';
+import { ModelOverrides, type ModelInstance } from './model-overrides.ts';
 
 interface Rigged {
   readonly group: Group;
@@ -61,10 +62,25 @@ export class PlayerAvatar {
   private mountSaddle = 0;
   private height = 1.65;
   private lookKey = '';
+  /** A drop-in glTF player model, when the manifest provides one. */
+  private custom: ModelInstance | null = null;
 
   constructor(scene: Scene) {
     this.scene = scene;
     this.scene.add(this.root);
+  }
+
+  /**
+   * Use a drop-in glTF model for the player instead of the procedural one.
+   * It is still scaled to the height chosen in the creator.
+   */
+  useCustom(overrides: ModelOverrides): void {
+    const model = overrides.player();
+    if (!model || this.custom) return;
+    this.custom = ModelOverrides.instantiate(model);
+    this.custom.object.scale.setScalar(this.height);
+    this.root.add(this.custom.object);
+    if (this.body) this.body.group.visible = false;
   }
 
   /** Rebuild the model if the character's look has changed. */
@@ -79,7 +95,9 @@ export class PlayerAvatar {
     this.height = humanoidHeight(look.appearance.height);
     this.body = rigged(geometry, createCreatureMaterials(rig, { outlineWidth: 0.008 }), rig.strideRate / Math.sqrt(this.height), true);
     this.body.group.scale.setScalar(this.height);
+    this.body.group.visible = this.custom === null;
     this.root.add(this.body.group);
+    this.custom?.object.scale.setScalar(this.height);
   }
 
   private setMount(speciesId: string | null): void {
@@ -128,15 +146,19 @@ export class PlayerAvatar {
       r.anim.needsUpdate = true;
     };
 
+    const seat = this.mount ? this.mountSaddle - this.height * 0.3 : 0;
     if (this.mount) {
       // Seated: the rider sits still; the mount does the walking.
       advance(this.mount, Math.min(2, speed / 8), 1.3);
       advance(this.body, 0, 0.2);
-      this.body.group.position.set(0, this.mountSaddle - this.height * 0.3, -0.05);
     } else {
       // 4.5 m/s is a walk and 9 a sprint, matching the movement code.
       advance(this.body, Math.min(2, speed / 4.5), 0.2);
-      this.body.group.position.set(0, 0, 0);
+    }
+    this.body.group.position.set(0, seat, this.mount ? -0.05 : 0);
+    if (this.custom) {
+      this.custom.object.position.set(0, seat, this.mount ? -0.05 : 0);
+      ModelOverrides.animate(this.custom, this.mount ? 0 : Math.min(2, speed / 4.5), dt);
     }
   }
 

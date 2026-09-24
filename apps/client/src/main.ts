@@ -52,6 +52,8 @@ import { BattleStage } from './game/battle-stage.ts';
 import { MenuUi } from './game/menu-ui.ts';
 import { askNewGame } from './game/new-game-ui.ts';
 import { PlayerAvatar } from './game/player-avatar.ts';
+import { ModelOverrides } from './game/model-overrides.ts';
+import { OverrideCrowd } from './game/override-crowd.ts';
 import { Toast, injectGameStyles, el, hpColor } from './game/ui-kit.ts';
 import { FrameProfiler } from './perf/profiler.ts';
 import { TerrainWorkerPool, type TerrainJob } from './perf/terrain-pool.ts';
@@ -541,11 +543,33 @@ const crowd = new CreatureCrowd(scene, { outlines: true, nearDistance: 45, shado
 /** Movement classes the AI already lifts off the ground (or sinks below water). */
 const ELEVATED_MOVEMENT = new Set(['flyer', 'floater', 'swimmer']);
 
+/** The override crowd reads the same brains, but ignores its own claims. */
+function readBrainForOverrides(index: number, out: CrowdMember): boolean {
+  const state = brains[index].state;
+  if (state.lod === BrainLod.Dormant) return false;
+  out.id = state.id;
+  out.speciesId = state.speciesId;
+  out.x = state.position.x;
+  out.y = state.position.y;
+  out.z = state.position.z;
+  out.yaw = state.yaw;
+  out.scale = 1;
+  out.speed = Math.hypot(state.velocity.x, state.velocity.z);
+  out.elevated = false;
+  return true;
+}
+
+/** Drop-in glTF models, if any are listed in public/models/manifest.json. */
+let overrides: ModelOverrides | null = null;
+let overrideCrowd: OverrideCrowd | null = null;
+
 function readBrain(index: number, out: CrowdMember): boolean {
   const brain = brains[index];
   const state = brain.state;
   // Dormant agents are far away and not worth drawing.
   if (state.lod === BrainLod.Dormant) return false;
+  // Drawn this frame with a drop-in model instead.
+  if (overrideCrowd?.claimed.has(state.id)) return false;
   out.id = state.id;
   out.speciesId = state.speciesId;
   out.x = state.position.x;
@@ -1136,6 +1160,9 @@ function render(alpha: number, frameDt: number): void {
   );
 
   creatureGlobals.uTime.value = simTime;
+  // The override crowd runs first, so the ids it draws can be skipped by the
+  // procedural crowd in the same frame.
+  overrideCrowd?.update(brains.length, readBrainForOverrides, camera.position.x, camera.position.z, crowd.hidden, frameDt);
   crowd.update(brains.length, readBrain, camera, frameDt);
   void alpha;
 
@@ -1392,6 +1419,20 @@ async function boot(): Promise<void> {
   refreshAvatar();
   renderPartyPanel();
 
+  // Drop-in models. Loaded after the world is up, so a slow or broken file
+  // never holds up the game; until one arrives, the procedural model stands in.
+  void ModelOverrides.load().then(async (loaded) => {
+    overrides = loaded;
+    await loaded.preload();
+    if (loaded.speciesIds.length > 0) overrideCrowd = new OverrideCrowd(scene, loaded);
+    stage.setOverrides(loaded);
+    if (loaded.playerReady) avatar.useCustom(loaded);
+    if (loaded.errors.length > 0) {
+      console.warn('[models] could not load:', loaded.errors);
+      toast.show(`Some custom models could not load (${loaded.errors.length}); using the built-in ones.`, 5);
+    }
+  });
+
   await reportBoot(100, 'ready');
   // Open looking out to sea, pitched down slightly so the shoreline and the
   // water are both in frame.
@@ -1422,6 +1463,8 @@ Object.assign(window as unknown as Record<string, unknown>, {
     terrainPool,
     rig,
     crowd,
+    get overrides() { return overrides; },
+    get overrideCrowd() { return overrideCrowd; },
     get workerMeshingMs() { return workerMeshingMs; },
   },
 });

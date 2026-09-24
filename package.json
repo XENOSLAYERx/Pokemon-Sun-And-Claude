@@ -22,6 +22,7 @@
     "sim": "node --experimental-strip-types tools/gen/headless-sim.ts",
     "validate:content": "node --experimental-strip-types tools/content/validate.ts",
     "bake:content": "node --experimental-strip-types tools/content/bake.ts",
+    "models:export": "node --experimental-strip-types tools/models/export-glb.ts",
     "dev": "npm run dev --workspace @alola/client",
     "dev:server": "npm run dev --workspace @alola/server"
   },

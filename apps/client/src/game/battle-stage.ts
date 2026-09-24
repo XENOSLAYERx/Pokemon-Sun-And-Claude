@@ -20,7 +20,8 @@ import {
   buildCreature, createCreatureMaterials, instancedCopy, strideFor, type CreatureMaterials,
 } from '@alola/render';
 import type { BattleSession, TurnResult } from '@alola/game';
-import type { InstancedBufferAttribute } from 'three';
+import { Box3, type InstancedBufferAttribute } from 'three';
+import { ModelOverrides, type ModelInstance } from './model-overrides.ts';
 
 /** Camera pitch per rig, in radians above the horizon. */
 const RIG_PITCH: Record<string, number> = {
@@ -46,6 +47,8 @@ interface Combatant {
   /** +1 player side, -1 foe side: which way "forward" is along the axis. */
   readonly sign: number;
   cycle: number;
+  /** Set when a drop-in glTF model replaces the procedural one. */
+  custom: ModelInstance | null;
   reaction: Reaction | null;
   reactionTime: number;
   delay: number;
@@ -65,11 +68,17 @@ export class BattleStage {
   private separation = 4;
   private blend = 0;
   private playerBattleId = -1;
+  private overrides: ModelOverrides | null = null;
 
   constructor(scene: Scene) {
     this.scene = scene;
     this.root.visible = false;
     this.scene.add(this.root);
+  }
+
+  /** Drop-in glTF models to use for combatants, where they exist. */
+  setOverrides(overrides: ModelOverrides): void {
+    this.overrides = overrides;
   }
 
   get active(): boolean {
@@ -96,12 +105,15 @@ export class BattleStage {
     const height = species.height * scale;
     const group = new Group();
     const model = new Group();
-    model.add(body, outline);
+    const loaded = this.overrides?.species(speciesId) ?? null;
+    const custom = loaded ? ModelOverrides.instantiate(loaded) : null;
+    if (custom) model.add(custom.object);
+    else model.add(body, outline);
     model.scale.setScalar(height);
     model.position.y = asset.rig.flies ? asset.rig.hoverHeight * height : 0;
     group.add(model);
 
-    const box = asset.geometry.boundingBox!;
+    const box = custom ? new Box3().setFromObject(custom.object) : asset.geometry.boundingBox!;
     const radius = Math.max(box.max.x - box.min.x, box.max.z - box.min.z) * 0.5 * height;
     const ring = new Mesh(
       new RingGeometry(radius * 1.15 + 0.05, radius * 1.35 + 0.08, 32),
@@ -116,7 +128,7 @@ export class BattleStage {
       hover: asset.rig.flies ? asset.rig.hoverHeight : 0,
       stride: strideFor(speciesId, asset.rig),
       home: new Vector3(), facing: 0, sign,
-      cycle: 0, reaction: 'enter', reactionTime: 0, delay: 0, fainted: false,
+      cycle: 0, custom, reaction: 'enter', reactionTime: 0, delay: 0, fainted: false,
     };
   }
 
@@ -273,6 +285,7 @@ export class BattleStage {
       c.cycle += dt * c.stride * Math.PI * 2 * (gait > 0 ? 1.4 : 0);
       c.anim.setXYZW(0, c.cycle, gait, c.sign > 0 ? 0.4 : 2.1, 0);
       c.anim.needsUpdate = true;
+      if (c.custom) ModelOverrides.animate(c.custom, gait, dt);
 
       c.group.position.copy(c.home).addScaledVector(this.axis, c.sign * offset);
       c.group.position.y = this.arena.y - sink;
