@@ -880,6 +880,70 @@ describe('Creature crowd', () => {
     assert.equal(crowd.stats.drawn, 100);
   });
 
+  test('growing a batch does not drop the instances already written that frame', () => {
+    // Batches used to grow one instance at a time mid-write; each regrowth
+    // replaced the batch and silently lost everything before it for a frame.
+    const scene = new Scene();
+    const crowd = new CreatureCrowd(scene, { outlines: false, maxVisible: 500, nearDistance: 5000 });
+    const list: Spec[] = Array.from({ length: 100 }, (_, i) => ({ id: i, species: 'WINGULL', x: (i % 10) - 5, z: -10 - i }));
+    crowd.update(list.length, reader(list), makeCamera(), 1 / 60);
+    const drawn = scene.children
+      .filter((c): c is IMc => c instanceof IMc && c.visible)
+      .reduce((sum, mesh) => sum + mesh.count, 0);
+    assert.equal(drawn, 100);
+  });
+
+  test('prewarm submits every model once, drawing nothing, then clears', () => {
+    const scene = new Scene();
+    const crowd = new CreatureCrowd(scene, { outlines: true });
+    const camera = makeCamera();
+    crowd.prewarm(['PIKACHU', 'LAPRAS']);
+    crowd.update(0, reader([]), camera, 1 / 60);
+    const meshes = scene.children.filter((c): c is IMc => c instanceof IMc);
+    // Two species, near and far, near with an outline.
+    assert.equal(meshes.length, 6);
+    const m = new M4c();
+    for (const mesh of meshes) {
+      assert.ok(mesh.visible && mesh.count === 1, 'each batch is submitted on the next render');
+      mesh.getMatrixAt(0, m);
+      assert.equal(m.getMaxScaleOnAxis(), 0, 'with a zero-size instance, so nothing appears');
+    }
+    crowd.update(0, reader([]), camera, 1 / 60);
+    assert.ok(meshes.every((mesh) => !mesh.visible && mesh.count === 0), 'and the frame after, it is gone');
+  });
+
+  test('a warm-up instance never displaces a real one', () => {
+    const scene = new Scene();
+    const crowd = new CreatureCrowd(scene, { outlines: false, nearDistance: 1000 });
+    crowd.prewarm(['ROWLET']);
+    crowd.update(1, reader([{ id: 1, species: 'ROWLET', x: 0, z: -10 }]), makeCamera(), 1 / 60);
+    const near = scene.children.find((c): c is IMc => c instanceof IMc && c.count > 0 && c.visible && (() => {
+      const m = new M4c();
+      c.getMatrixAt(0, m);
+      return m.getMaxScaleOnAxis() > 0;
+    })());
+    assert.ok(near, 'the real Rowlet is drawn');
+    assert.equal(near.count, 1);
+  });
+
+  test('turning outlines on warms the outline shader before anything needs it', () => {
+    // Quality presets toggle outlines and shadows at runtime. The shaders for
+    // them used to compile on the first frame a Pokemon came close: a hitch.
+    const scene = new Scene();
+    const crowd = new CreatureCrowd(scene, { outlines: false });
+    const camera = makeCamera();
+    crowd.prewarm(['PIKIPEK']);
+    crowd.update(0, reader([]), camera, 1 / 60);
+    crowd.update(0, reader([]), camera, 1 / 60);
+    crowd.configure({ outlines: true });
+    crowd.update(0, reader([]), camera, 1 / 60);
+    const submitted = scene.children.filter((c): c is IMc => c instanceof IMc && c.visible && c.count === 1);
+    // The body material is shared by both detail levels; the outline has its own.
+    const materials = new Set(submitted.map((mesh) => mesh.material));
+    assert.equal(submitted.length, 3, 'near body, its outline, and the far body are all submitted');
+    assert.equal(materials.size, 2, 'including the outline material');
+  });
+
   test('a creature faces the way the simulation says it is heading', () => {
     // The sim's yaw 0 faces -Z; the models face +Z. The capsules this replaced
     // were symmetric, so nothing ever checked.

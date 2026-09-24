@@ -25,7 +25,7 @@ import {
   CHUNK_SIZE, STREAMING_RADIUS, FAR_TERRAIN_RADIUS, WEATHER_PROFILES, BUILD_PENDING,
   type ChunkRecord,
 } from '@alola/world';
-import { allIslands, getSpecies, getBiome, islandAt, type WeatherId } from '@alola/data';
+import { allIslands, allSpecies, getSpecies, getBiome, islandAt, type WeatherId } from '@alola/data';
 import {
   PokemonBrain, BrainLod, lodForDistance, visibilityFrom,
   type BrainState, type BrainWorldView, type PerceivableAgent,
@@ -1410,6 +1410,14 @@ async function boot(): Promise<void> {
 
   await reportBoot(85, 'populating Alola');
   spawnWildlife();
+
+  await reportBoot(90, 'preparing Pokémon models');
+  // Build, upload and compile every Pokémon model now, behind the loading
+  // screen, rather than on the frame each species first wanders into view —
+  // otherwise every new species on screen is a hitch.
+  crowd.prewarm(allSpecies().map((s) => s.id));
+  crowd.update(0, () => false, camera, 0);
+  renderer.render(scene, camera);
 
   await reportBoot(94, 'reading your save');
   // Hide the boot screen first: a new game needs the player to answer, and

@@ -65,6 +65,16 @@ interface SpeciesEntry {
   readonly hover: number;
   near: Batch | null;
   far: Batch | null;
+  /** Instances wanted this frame at each detail level. */
+  wantNear: number;
+  wantFar: number;
+}
+
+interface Candidate {
+  index: number;
+  distance: number;
+  entry: SpeciesEntry;
+  high: boolean;
 }
 
 interface AnimState {
@@ -117,13 +127,18 @@ export class CreatureCrowd {
     id: 0, speciesId: '', x: 0, y: 0, z: 0, yaw: 0, scale: 1, speed: 0, elevated: false,
   };
 
-  // Candidates for the visible cap, reused between frames.
-  private candidates: { index: number; distance: number }[] = [];
+  // Candidates for the visible cap. The records are pooled so a frame
+  // allocates nothing; `candidates` holds references into the pool.
+  private readonly candidatePool: Candidate[] = [];
+  private readonly candidates: Candidate[] = [];
 
   readonly stats = { drawn: 0, near: 0, far: 0, culled: 0, drawCalls: 0, species: 0 };
 
   /** Ids to skip this frame — the Pokémon currently being battled. */
   readonly hidden = new Set<number>();
+
+  /** Batches to submit once on the next update, whether or not in use. */
+  private readonly warm = new Set<Batch>();
 
   constructor(scene: Scene, opts: CrowdOptions = {}) {
     this.scene = scene;
@@ -136,20 +151,26 @@ export class CreatureCrowd {
   configure(opts: CrowdOptions): void {
     if (opts.nearDistance !== undefined) this.nearDistance = opts.nearDistance;
     if (opts.maxVisible !== undefined) this.maxVisible = opts.maxVisible;
-    if (opts.shadows !== undefined) {
+    let changed = false;
+    if (opts.shadows !== undefined && opts.shadows !== this.shadows) {
       this.shadows = opts.shadows;
+      changed = true;
       for (const entry of this.species.values()) {
         if (entry.near) entry.near.body.castShadow = this.shadows;
       }
     }
     if (opts.outlines !== undefined && opts.outlines !== this.outlines) {
       this.outlines = opts.outlines;
+      changed = true;
       // Outline meshes are created with the near batch; rebuild them.
       for (const entry of this.species.values()) {
         if (entry.near) this.disposeBatch(entry.near);
         entry.near = null;
       }
     }
+    // Turning outlines or shadows on needs shaders that may never have been
+    // compiled; warm them now rather than when the next Pokémon comes close.
+    if (changed) this.prewarm([...this.species.keys()]);
   }
 
   private entryFor(speciesId: string): SpeciesEntry {
@@ -166,6 +187,8 @@ export class CreatureCrowd {
       hover: asset.rig.flies ? asset.rig.hoverHeight : 0,
       near: null,
       far: null,
+      wantNear: 0,
+      wantFar: 0,
     };
     this.species.set(speciesId, entry);
     this.stats.species = this.species.size;
@@ -219,6 +242,25 @@ export class CreatureCrowd {
   }
 
   /**
+   * Build and upload the models for `speciesIds` now, rather than on the frame
+   * each species first comes into view.
+   *
+   * Building a species' mesh takes 1–14 ms, and its first draw uploads the
+   * buffers and, for the first creature of all, compiles the shaders: enough
+   * to turn a frame into a visible hitch whenever something new wanders on
+   * screen. The next `update()` gives each batch here one zero-scale
+   * instance, so that frame's render submits it — compiling and uploading
+   * everything, shadow pass included — while drawing nothing.
+   */
+  prewarm(speciesIds: Iterable<string>): void {
+    for (const id of speciesIds) {
+      const entry = this.entryFor(id);
+      this.warm.add(this.ensure(entry, 'high', 1));
+      this.warm.add(this.ensure(entry, 'low', 1));
+    }
+  }
+
+  /**
    * Draw this frame's crowd.
    *
    * `read(i, out)` fills `out` for the i-th creature and returns false to skip
@@ -241,7 +283,7 @@ export class CreatureCrowd {
 
     // Pass 1: cull, and collect candidates by distance.
     const candidates = this.candidates;
-    candidates.length = 0;
+    let n = 0;
     let culled = 0;
     const m = this.member;
     for (let i = 0; i < count; i++) {
@@ -254,23 +296,46 @@ export class CreatureCrowd {
         culled++;
         continue;
       }
-      const d = Math.hypot(m.x - cx, m.y - cy, m.z - cz);
-      candidates.push({ index: i, distance: d });
+      let c = this.candidatePool[n];
+      if (!c) {
+        c = { index: 0, distance: 0, entry, high: false };
+        this.candidatePool[n] = c;
+      }
+      c.index = i;
+      c.distance = Math.hypot(m.x - cx, m.y - cy, m.z - cz);
+      c.entry = entry;
+      candidates[n++] = c;
     }
+    candidates.length = n;
     if (candidates.length > this.maxVisible) {
       candidates.sort((a, b) => a.distance - b.distance);
       candidates.length = this.maxVisible;
     }
 
-    // Pass 2: write instances.
+    // Pass 2: size every batch for this frame before writing any of them.
+    // Growing a batch replaces it, so growing one part-way through the writes
+    // would drop the instances already in it for a frame.
+    for (const entry of this.species.values()) {
+      entry.wantNear = 0;
+      entry.wantFar = 0;
+    }
+    for (const c of candidates) {
+      c.high = c.distance < this.nearDistance;
+      if (c.high) c.entry.wantNear++;
+      else c.entry.wantFar++;
+    }
+    for (const entry of this.species.values()) {
+      if (entry.wantNear > 0) this.ensure(entry, 'high', entry.wantNear);
+      if (entry.wantFar > 0) this.ensure(entry, 'low', entry.wantFar);
+    }
+
+    // Pass 3: write instances.
     let near = 0;
     let far = 0;
-    for (const { index, distance } of candidates) {
-      read(index, m);
-      const entry = this.entryFor(m.speciesId);
-      const detail = distance < this.nearDistance ? 'high' : 'low';
-      const current = detail === 'high' ? entry.near : entry.far;
-      const batch = this.ensure(entry, detail, (current?.count ?? 0) + 1);
+    for (const c of candidates) {
+      read(c.index, m);
+      const entry = c.entry;
+      const batch = (c.high ? entry.near : entry.far)!;
 
       // Gait: how fast it is moving relative to its own walking pace.
       let state = this.anim.get(m.id);
@@ -295,8 +360,21 @@ export class CreatureCrowd {
       const slot = batch.count++;
       batch.body.setMatrixAt(slot, _matrix);
       batch.anim.setXYZW(slot, state.cycle, state.gait, (m.id * 0.61) % (Math.PI * 2), 0);
-      if (detail === 'high') near++;
+      if (c.high) near++;
       else far++;
+    }
+
+    // Batches waiting to be warmed that nothing is drawing get a zero-scale
+    // instance: submitted, so compiled and uploaded, but invisible. One that
+    // has since been replaced is no longer in the scene and is skipped.
+    if (this.warm.size > 0) {
+      _matrix.makeScale(0, 0, 0);
+      for (const batch of this.warm) {
+        if (batch.count > 0 || !batch.body.parent) continue;
+        batch.body.setMatrixAt(0, _matrix);
+        batch.count = 1;
+      }
+      this.warm.clear();
     }
 
     // Publish counts and flag uploads.
