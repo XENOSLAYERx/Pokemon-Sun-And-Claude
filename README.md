@@ -12,7 +12,9 @@ ground you were standing on. Catch it, level your team, save, come back. It runs
 in a browser, it runs headless on a server, and 553 tests run in Node with no
 browser and no build step.
 
-🎮 **[How to play →](PLAYING.md)** — setup, controls and troubleshooting, from a clean machine.
+🎮 **[Step-by-step tutorial →](TUTORIAL.md)** — never used a terminal? Start here: install, run, and your first catch.
+
+📖 **[How to play →](PLAYING.md)** — controls, how battles work, and troubleshooting.
 
 📚 **[Full documentation index →](docs/README.md)** — twenty design documents,
 seven technical design documents, a production roadmap and a world design bible.
@@ -34,14 +36,15 @@ npm run sim               # headless simulation harness with per-system timings
 npm run models:export     # write the built-in 3D models out as .glb files
 ```
 
-Node ≥ 20.11. **There is no build step.** `erasableSyntaxOnly` is enabled, so
+Node ≥ 22.6. **There is no build step.** `erasableSyntaxOnly` is enabled, so
 every source file executes directly under `node --experimental-strip-types` —
 no enums, no parameter properties, nothing that survives type erasure.
 
 ### Playing it
 
 `npm run dev`, then open <http://localhost:5173/> and pick a name and a partner.
-**[PLAYING.md](PLAYING.md)** has the full setup, troubleshooting and tips.
+**[TUTORIAL.md](TUTORIAL.md)** walks through it step by step from a clean machine;
+**[PLAYING.md](PLAYING.md)** has controls, troubleshooting and tips.
 
 | | |
 |---|---|

@@ -1,19 +1,22 @@
 # Playing Project Alola
 
-Runs in any modern browser on Windows, macOS or Linux. There is nothing to
-install beyond Node — no game client, no account, no build step.
+Runs in any modern browser on Windows, macOS, Linux or a Chromebook. There is
+nothing to install beyond Node — no game client, no account, no build step.
+
+> **New to terminals?** Follow the **[step-by-step tutorial](TUTORIAL.md)**
+> instead. It covers every command, including installing Node on a Chromebook.
 
 ---
 
 ## 1. Get Node
 
-You need **Node 20.11 or newer**. Check what you have:
+You need **Node 22.6 or newer**. Check what you have:
 
 ```bash
 node -v
 ```
 
-If that errors or prints something below `v20.11`, install it from
+If that errors or prints something below `v22.6`, install it from
 [nodejs.org](https://nodejs.org) (take the LTS build) and reopen your terminal.
 
 ## 2. Get the code
@@ -125,8 +128,13 @@ Performance panel — if it says *Software fallback*, Chrome isn't using your
 GPU. Turn on `chrome://settings/system` → "Use graphics acceleration when
 available" and restart Chrome.
 
-**`npm install` fails.**
-Almost always an old Node. `node -v` must be ≥ 20.11.
+**`npm error enoent Could not read package.json`.**
+You're not in the game's folder. `cd ~/Pokemon-Sun-And-Claude` (or wherever you
+cloned it) and run the command again. Every `npm` command runs from there.
+
+**`npm install` or `npm test` fails.**
+Almost always an old Node. `node -v` must be ≥ 22.6; `npm test` on anything
+older stops with `bad option: --experimental-strip-types`.
 
 **Port 5173 is already in use.**
 `npm run dev -- --port 5200`, then open that port instead.
