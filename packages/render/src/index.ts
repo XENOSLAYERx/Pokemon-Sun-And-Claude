@@ -35,3 +35,10 @@ export type { QualityLevel, QualityPreset } from './pipeline/quality.ts';
 
 export { CameraRig, CAMERA_MODES, frameBattle } from './camera/rig.ts';
 export type { CameraMode, CameraModeConfig, SphereCast, ShakeImpulse } from './camera/rig.ts';
+
+export {
+  buildCreature, hasBespokeModel, strideFor, CREATURE_MODELS,
+  createCreatureMaterials, creatureGlobals, Bone, Motion, BONE_COUNT,
+  CreatureCrowd, instancedCopy, buildPlayerModel, humanoidHeight,
+} from './creatures/index.ts';
+export type { CreatureAsset, CreatureMaterials, RigSpec, Detail, CrowdMember, CrowdOptions, HumanoidLook } from './creatures/index.ts';

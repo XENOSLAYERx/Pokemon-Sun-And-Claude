@@ -36,7 +36,8 @@ import {
   OCEAN_VERTEX_SHADER, OCEAN_FRAGMENT_SHADER, defaultOceanUniforms, MAX_OCEAN_WAVES,
   SKY_VERTEX_SHADER, SKY_FRAGMENT_SHADER, defaultSkyUniforms, lightStepsFor,
   CameraRig, AdaptiveQuality, detectQuality, readRendererString,
-  QUALITY_PRESETS, type QualityPreset, type TerrainMeshArrays,
+  QUALITY_PRESETS, CreatureCrowd, creatureGlobals,
+  type QualityPreset, type TerrainMeshArrays, type CrowdMember,
 } from '@alola/render';
 import { AudioDirector } from '@alola/audio';
 import { SaveManager, MemoryStorage, type SaveFile } from '@alola/save';
@@ -50,6 +51,7 @@ import { BattleUi } from './game/battle-ui.ts';
 import { BattleStage } from './game/battle-stage.ts';
 import { MenuUi } from './game/menu-ui.ts';
 import { askNewGame } from './game/new-game-ui.ts';
+import { PlayerAvatar } from './game/player-avatar.ts';
 import { Toast, injectGameStyles, el, hpColor } from './game/ui-kit.ts';
 import { FrameProfiler } from './perf/profiler.ts';
 import { TerrainWorkerPool, type TerrainJob } from './perf/terrain-pool.ts';
@@ -131,6 +133,14 @@ function applyQuality(preset: QualityPreset): void {
     const payload = record.payload as ChunkPayload | null;
     if (payload) payload.mesh.castShadow = payload.lod <= shadowCastLod;
   }
+  // Outlines double the creature draw; the two lowest presets go without.
+  // The near-detail radius tracks draw distance.
+  crowd.configure({
+    outlines: preset.name !== 'potato' && preset.name !== 'low',
+    shadows: preset.shadows,
+    nearDistance: 30 + 30 * preset.drawDistanceScale,
+    maxVisible: preset.maxVisiblePokemon,
+  });
 
   const qualityEl = document.getElementById('v-quality');
   if (qualityEl) qualityEl.textContent = `${preset.label} (${rendererString.slice(0, 28)})`;
@@ -521,58 +531,31 @@ function disposeChunk(record: ChunkRecord): void {
 // -------------------------------------------------------------- Pokémon viz
 
 /**
- * Placeholder Pokémon rendering.
- *
- * Production uses skinned meshes per species from the art pipeline. Here each
- * species gets a procedurally-shaped capsule sized from its real height and
- * weight, tinted by primary type. That is deliberately more than a debug cube:
- * it makes species visually distinguishable, so AI behaviour can actually be
- * observed and tuned before any art exists.
+ * Wild Pokémon are drawn by a crowd renderer: one instanced draw per species
+ * per detail level, animated in the vertex shader from how fast the AI is
+ * actually moving. It replaced one capsule mesh per Pokémon — two hundred draw
+ * calls, plus two hundred more in the shadow pass.
  */
-const TYPE_COLORS: Record<string, number> = {
-  normal: 0xa8a878, fire: 0xf08030, water: 0x6890f0, electric: 0xf8d030,
-  grass: 0x78c850, ice: 0x98d8d8, fighting: 0xc03028, poison: 0xa040a0,
-  ground: 0xe0c068, flying: 0xa890f0, psychic: 0xf85888, bug: 0xa8b820,
-  rock: 0xb8a038, ghost: 0x705898, dragon: 0x7038f8, dark: 0x705848,
-  steel: 0xb8b8d0, fairy: 0xee99ac,
-};
+const crowd = new CreatureCrowd(scene, { outlines: true, nearDistance: 45, shadows: true });
 
-interface PokemonVisual {
-  mesh: Mesh;
-  brain: PokemonBrain;
-}
+/** Movement classes the AI already lifts off the ground (or sinks below water). */
+const ELEVATED_MOVEMENT = new Set(['flyer', 'floater', 'swimmer']);
 
-const pokemonVisuals = new Map<number, PokemonVisual>();
-const speciesGeometryCache = new Map<string, CapsuleGeometry>();
-const speciesMaterialCache = new Map<string, MeshStandardMaterial>();
-
-function visualFor(brain: PokemonBrain): PokemonVisual {
-  const species = getSpecies(brain.state.speciesId);
-  const key = species.id;
-
-  let geometry = speciesGeometryCache.get(key);
-  if (!geometry) {
-    const height = clamp(species.height, 0.25, 6);
-    const radius = clamp(Math.cbrt(species.weight) * 0.055, 0.12, height * 0.42);
-    geometry = new CapsuleGeometry(radius, Math.max(0.05, height - radius * 2), 4, 8);
-    speciesGeometryCache.set(key, geometry);
-  }
-
-  let material = speciesMaterialCache.get(key);
-  if (!material) {
-    material = new MeshStandardMaterial({
-      color: TYPE_COLORS[species.types[0]] ?? 0xcccccc,
-      roughness: 0.7,
-      metalness: 0.05,
-    });
-    speciesMaterialCache.set(key, material);
-  }
-
-  const mesh = new Mesh(geometry, material);
-  mesh.castShadow = true;
-  mesh.position.set(brain.state.position.x, brain.state.position.y + species.height / 2, brain.state.position.z);
-  scene.add(mesh);
-  return { mesh, brain };
+function readBrain(index: number, out: CrowdMember): boolean {
+  const brain = brains[index];
+  const state = brain.state;
+  // Dormant agents are far away and not worth drawing.
+  if (state.lod === BrainLod.Dormant) return false;
+  out.id = state.id;
+  out.speciesId = state.speciesId;
+  out.x = state.position.x;
+  out.y = state.position.y;
+  out.z = state.position.z;
+  out.yaw = state.yaw;
+  out.scale = 1;
+  out.speed = Math.hypot(state.velocity.x, state.velocity.z);
+  out.elevated = ELEVATED_MOVEMENT.has(getSpecies(state.speciesId).movement);
+  return true;
 }
 
 function spawnWildlife(): void {
@@ -611,7 +594,6 @@ function spawnWildlife(): void {
         const brain = new PokemonBrain(state, WORLD_SEED ^ state.id);
         brains.push(brain);
         perceivablesDirty = true;
-        pokemonVisuals.set(state.id, visualFor(brain));
       }
     }
   }
@@ -625,11 +607,6 @@ function despawnDistant(): void {
       brain.state.position.z - player.position.z,
     );
     if (distance > 700) {
-      const visual = pokemonVisuals.get(brain.state.id);
-      if (visual) {
-        scene.remove(visual.mesh);
-        pokemonVisuals.delete(brain.state.id);
-      }
       brains.splice(i, 1);
       perceivablesDirty = true;
     }
@@ -687,10 +664,9 @@ function startBattle(offer: EncounterOffer): void {
   });
 
   stage.begin(session, player.position);
-  playerMesh.visible = false;
+  avatar.visible = false;
   // Hide the overworld model of whatever we are fighting; the stage draws it.
-  const visual = pokemonVisuals.get(offer.candidate.id);
-  if (visual) visual.mesh.visible = false;
+  crowd.hidden.add(offer.candidate.id);
 
   syncHudVisibility();
   battleUi.open(session);
@@ -698,7 +674,7 @@ function startBattle(offer: EncounterOffer): void {
 
 function endBattle(finished: BattleSession, outcome: string): void {
   stage.end();
-  playerMesh.visible = true;
+  avatar.visible = true;
   session = null;
   mode = 'overworld';
   keys.clear();
@@ -707,11 +683,6 @@ function endBattle(finished: BattleSession, outcome: string): void {
   const removeAgent = (): void => {
     const index = brains.findIndex((b) => b.state.id === battleAgentId);
     if (index >= 0) {
-      const visual = pokemonVisuals.get(battleAgentId);
-      if (visual) {
-        scene.remove(visual.mesh);
-        pokemonVisuals.delete(battleAgentId);
-      }
       brains.splice(index, 1);
       perceivablesDirty = true;
     }
@@ -745,19 +716,19 @@ function endBattle(finished: BattleSession, outcome: string): void {
     default: {
       // Fled, or ended some other way. Give the player a moment before the
       // same Pokémon can drag them back in.
-      const visual = pokemonVisuals.get(battleAgentId);
-      if (visual) visual.mesh.visible = true;
       encounterCooldown = 4;
       break;
     }
   }
 
+  crowd.hidden.delete(battleAgentId);
   battleAgentId = -1;
 }
 
 const battleUi = new BattleUi({
   onFinished: (finished, outcome) => endBattle(finished, outcome),
   onCue: (cue) => { void cue; },
+  onTurn: (active, result) => stage.react(active, result),
 });
 
 const menuUi = new MenuUi({
@@ -884,12 +855,16 @@ function updatePlayer(dt: number): void {
 
 // -------------------------------------------------------------- boot & loop
 
-const playerMesh = new Mesh(
-  new CapsuleGeometry(0.28, 1.1, 4, 8),
-  new MeshStandardMaterial({ color: 0xffd08a, roughness: 0.6 }),
-);
-playerMesh.castShadow = true;
-scene.add(playerMesh);
+/**
+ * The player's body: built from the saved character, animated by movement,
+ * and riding a real Pokémon when mounted. Replaced a tan capsule.
+ */
+const avatar = new PlayerAvatar(scene);
+
+/** Rebuild the avatar from the profile's current look. */
+function refreshAvatar(): void {
+  avatar.setLook({ appearance: profile.appearance, outfit: profile.outfit });
+}
 
 const clock = new FixedClock({ tickRate: 60, maxStepsPerFrame: 4 });
 const perf = new FrameProfiler();
@@ -1088,6 +1063,7 @@ function render(alpha: number, frameDt: number): void {
 
   // Camera. During a battle the stage decides where it goes, easing across
   // from wherever exploring left it rather than cutting.
+  stage.update(frameDt);
   const staged = stage.active ? stage.cameraFor(camera, frameDt) : null;
   if (staged) {
     const weight = Math.min(1, frameDt * 4 + stage.transition * 0.08);
@@ -1153,24 +1129,15 @@ function render(alpha: number, frameDt: number): void {
   oceanMesh.position.set(camera.position.x, 0, camera.position.z);
 
   // Player and Pokémon transforms.
-  playerMesh.position.set(player.position.x, player.position.y + 0.83, player.position.z);
-  playerMesh.rotation.y = player.yaw;
+  avatar.update(
+    player.position.x, player.position.y, player.position.z, player.yaw,
+    Math.hypot(player.velocity.x, player.velocity.z), player.riding,
+    terrain.sampleHeight(player.position.x, player.position.z) < 0, frameDt,
+  );
 
-  for (const [id, visual] of pokemonVisuals) {
-    const brain = visual.brain;
-    if (!brain) continue;
-    const species = getSpecies(brain.state.speciesId);
-    visual.mesh.position.set(
-      brain.state.position.x,
-      brain.state.position.y + species.height / 2,
-      brain.state.position.z,
-    );
-    visual.mesh.rotation.y = brain.state.yaw;
-    // Dormant agents are not worth drawing.
-    visual.mesh.visible = brain.state.lod !== BrainLod.Dormant;
-    void id;
-    void alpha;
-  }
+  creatureGlobals.uTime.value = simTime;
+  crowd.update(brains.length, readBrain, camera, frameDt);
+  void alpha;
 
   perf.end('prep');
   perf.begin('submit');
@@ -1205,7 +1172,7 @@ function updateHud(dt: number): void {
   dom.chunks.textContent = terrainPool.available
     ? `${streamer.stats.loaded} (q${streamer.stats.queueDepth}, ${TERRAIN_WORKERS}w)`
     : `${streamer.stats.loaded} (q${streamer.stats.queueDepth}, main thread)`;
-  dom.mons.textContent = String(brains.length);
+  dom.mons.textContent = `${crowd.stats.drawn}/${brains.length} (${crowd.stats.drawCalls} draws)`;
 
   renderPartyPanel();
   renderPrompt();
@@ -1422,6 +1389,7 @@ async function boot(): Promise<void> {
   // asking them a question behind a loading curtain is not a question.
   bootEl.classList.add('done');
   await loadOrCreateProfile();
+  refreshAvatar();
   renderPartyPanel();
 
   await reportBoot(100, 'ready');
@@ -1452,6 +1420,8 @@ Object.assign(window as unknown as Record<string, unknown>, {
     adaptive,
     camera,
     terrainPool,
+    rig,
+    crowd,
     get workerMeshingMs() { return workerMeshingMs; },
   },
 });

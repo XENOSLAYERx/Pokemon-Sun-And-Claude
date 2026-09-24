@@ -30,6 +30,12 @@ export default defineConfig({
     target: 'es2022',
     sourcemap: true,
     rollupOptions: {
+      // The game, plus the model sheet (/models.html) for looking at every
+      // creature side by side.
+      input: {
+        main: resolve(here, 'index.html'),
+        models: resolve(here, 'models.html'),
+      },
       output: {
         manualChunks: {
           // Three is large and changes rarely; keeping it separate means a

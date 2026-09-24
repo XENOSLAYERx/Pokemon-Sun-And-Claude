@@ -664,3 +664,323 @@ describe('Worker meshing path', () => {
       'the chunk material is chosen from biomes[0], so it must be the majority biome');
   });
 });
+
+// ------------------------------------------------------------------ creatures
+
+import { SPECIES_LIST as ALL_SPECIES } from '@alola/data';
+import {
+  buildCreature, hasBespokeModel, CREATURE_MODELS, strideFor,
+  ModelBuilder, hex, emptyRig, packRig, BONE_COUNT, Bone, Motion,
+} from '../src/creatures/index.ts';
+
+describe('Creature models', () => {
+  test('every species in the dex has a bespoke model', () => {
+    const missing = ALL_SPECIES.filter((s) => !hasBespokeModel(s.id)).map((s) => s.id);
+    assert.deepEqual(missing, [], 'a species without a model falls back to a generic blob');
+    for (const id of Object.keys(CREATURE_MODELS)) {
+      assert.ok(ALL_SPECIES.some((s) => s.id === id), `model for ${id} matches no species`);
+    }
+  });
+
+  test('every model builds at both detail levels with valid bones', () => {
+    for (const species of ALL_SPECIES) {
+      for (const detail of ['high', 'low'] as const) {
+        const asset = buildCreature(species.id, detail);
+        const bones = asset.geometry.getAttribute('aBone').array;
+        assert.ok(asset.vertexCount > 0, `${species.id} ${detail} is empty`);
+        for (let i = 0; i < bones.length; i++) {
+          assert.ok(bones[i] >= 0 && bones[i] < BONE_COUNT, `${species.id} uses bone ${bones[i]}`);
+        }
+      }
+    }
+  });
+
+  test('the far LOD is always cheaper, and both stay inside a crowd budget', () => {
+    for (const species of ALL_SPECIES) {
+      const high = buildCreature(species.id, 'high').triangleCount;
+      const low = buildCreature(species.id, 'low').triangleCount;
+      assert.ok(low < high, `${species.id}: low ${low} is not below high ${high}`);
+      // A hillside of twenty is drawn twice (body + outline): the budget is
+      // what keeps that affordable on integrated graphics.
+      assert.ok(high <= 4500, `${species.id} high LOD is ${high} triangles`);
+      assert.ok(low <= 1200, `${species.id} low LOD is ${low} triangles`);
+    }
+  });
+
+  test('parts are wound outward, so the outline hull sits behind them', () => {
+    // Regression: the first version wound every ellipsoid and limb inside
+    // out. The body drew its interior and the back-face outline covered the
+    // whole creature in black.
+    const b = new ModelBuilder('high');
+    b.ellipsoid([0, 1, 0], [0.4, 0.3, 0.5], hex(0xffffff), Bone.Root, [0.3, 0.2, 0.1]);
+    b.limb([0, 0, 0], [0.2, 0.8, 0.3], 0.1, 0.05, hex(0xffffff), Bone.Root, { flatten: 0.5, roll: 0.4 });
+    b.shape([[0, 0], [0.3, 0.1], [0.1, 0.4]], 0.05, { at: [0, 0, 0], rotation: [0.2, 0.5, 0] }, hex(0xffffff), Bone.Root);
+    const g = b.build();
+    const pos = g.getAttribute('position').array;
+    const nrm = g.getAttribute('normal').array;
+    const idx = g.getIndex()!.array;
+    let wrong = 0;
+    let total = 0;
+    for (let t = 0; t < idx.length; t += 3) {
+      const [a, c, d] = [idx[t] * 3, idx[t + 1] * 3, idx[t + 2] * 3];
+      const e1 = [pos[c] - pos[a], pos[c + 1] - pos[a + 1], pos[c + 2] - pos[a + 2]];
+      const e2 = [pos[d] - pos[a], pos[d + 1] - pos[a + 1], pos[d + 2] - pos[a + 2]];
+      const face = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+      const area = Math.hypot(face[0], face[1], face[2]);
+      if (area < 1e-9) continue; // pole triangles collapse to a point
+      const vn = [nrm[a] + nrm[c] + nrm[d], nrm[a + 1] + nrm[c + 1] + nrm[d + 1], nrm[a + 2] + nrm[c + 2] + nrm[d + 2]];
+      total++;
+      if (face[0] * vn[0] + face[1] * vn[1] + face[2] * vn[2] <= 0) wrong++;
+    }
+    assert.ok(total > 100);
+    assert.equal(wrong, 0, `${wrong} of ${total} triangles face inward`);
+  });
+
+  test('normals are unit length', () => {
+    const asset = buildCreature('PIKACHU', 'high');
+    const n = asset.geometry.getAttribute('normal').array;
+    for (let i = 0; i < n.length; i += 3) {
+      assert.ok(Math.abs(Math.hypot(n[i], n[i + 1], n[i + 2]) - 1) < 1e-4);
+    }
+  });
+
+  test('every model stands on the ground', () => {
+    for (const species of ALL_SPECIES) {
+      const box = buildCreature(species.id, 'high').geometry.boundingBox!;
+      assert.ok(Math.abs(box.min.y) < 1e-3, `${species.id} lowest point is at ${box.min.y}`);
+    }
+  });
+
+  test('bone pivots follow the model when it is seated on the ground', () => {
+    // Grounding translates the geometry; a pivot left behind would make
+    // every leg rotate about a point in mid-air.
+    for (const species of ALL_SPECIES) {
+      const asset = buildCreature(species.id, 'high');
+      const box = asset.geometry.boundingBox!;
+      for (const bone of asset.rig.bones) {
+        if (bone.motion === Motion.None) continue;
+        assert.ok(bone.pivot[1] >= box.min.y - 0.05 && bone.pivot[1] <= box.max.y + 0.05,
+          `${species.id} has a pivot at y=${bone.pivot[1]} outside [${box.min.y}, ${box.max.y}]`);
+      }
+    }
+  });
+
+  test('building is deterministic', () => {
+    const run = (): Float32Array => {
+      const b = new ModelBuilder('high');
+      const rig = emptyRig();
+      CREATURE_MODELS.LAPRAS(b, rig);
+      return b.build().getAttribute('position').array as Float32Array;
+    };
+    assert.deepEqual(run(), run());
+  });
+
+  test('the rig packs into the shader layout', () => {
+    const packed = packRig(buildCreature('CHARIZARD', 'high').rig);
+    assert.equal(packed.pivots.length, BONE_COUNT * 3);
+    assert.equal(packed.params.length, BONE_COUNT * 4);
+    for (let i = 0; i < BONE_COUNT; i++) {
+      const len = Math.hypot(packed.axes[i * 3], packed.axes[i * 3 + 1], packed.axes[i * 3 + 2]);
+      assert.ok(Math.abs(len - 1) < 1e-5, 'axes must be normalised on upload');
+    }
+  });
+
+  test('fliers hover and walkers do not', () => {
+    assert.ok(buildCreature('LUNALA', 'high').rig.hoverHeight > 0);
+    assert.ok(buildCreature('WINGULL', 'high').rig.hoverHeight > 0);
+    assert.equal(buildCreature('BEWEAR', 'high').rig.hoverHeight, 0);
+  });
+
+  test('small creatures step faster than large ones', () => {
+    const pikachu = strideFor('PIKACHU', buildCreature('PIKACHU', 'high').rig);
+    const mudsdale = strideFor('MUDSDALE', buildCreature('MUDSDALE', 'high').rig);
+    assert.ok(pikachu > mudsdale * 1.5);
+  });
+
+  test('palette colours are converted to linear', () => {
+    assert.deepEqual(hex(0xffffff), [1, 1, 1]);
+    assert.deepEqual(hex(0x000000), [0, 0, 0]);
+    // sRGB mid-grey is ~0.216 linear. Skipping the conversion washes every
+    // creature out toward pastel.
+    assert.ok(Math.abs(hex(0x808080)[0] - 0.2158) < 0.001);
+  });
+});
+
+// ---------------------------------------------------------------- crowd
+
+import { Scene, PerspectiveCamera, Vector3 as V3c, Matrix4 as M4c, InstancedMesh as IMc } from 'three';
+import { CreatureCrowd, instancedCopy, type CrowdMember } from '../src/creatures/index.ts';
+
+describe('Creature crowd', () => {
+  const makeCamera = (): PerspectiveCamera => {
+    const camera = new PerspectiveCamera(60, 16 / 9, 0.3, 5000);
+    camera.position.set(0, 3, 0);
+    camera.lookAt(0, 3, -10); // facing -Z
+    camera.updateMatrixWorld();
+    return camera;
+  };
+
+  type Spec = { id: number; species: string; x: number; z: number; speed?: number };
+  const reader = (list: Spec[]) => (i: number, out: CrowdMember): boolean => {
+    const s = list[i];
+    out.id = s.id; out.speciesId = s.species; out.x = s.x; out.y = 0; out.z = s.z;
+    out.yaw = 0; out.scale = 1; out.speed = s.speed ?? 0; out.elevated = false;
+    return true;
+  };
+
+  test('one draw per species per detail level, however many are on screen', () => {
+    const crowd = new CreatureCrowd(new Scene(), { outlines: false });
+    const list: Spec[] = Array.from({ length: 30 }, (_, i) => ({ id: i, species: 'PIKIPEK', x: (i % 6) - 3, z: -10 - i }));
+    crowd.update(list.length, reader(list), makeCamera(), 1 / 60);
+    assert.equal(crowd.stats.drawn, 30);
+    assert.ok(crowd.stats.drawCalls <= 2, `${crowd.stats.drawCalls} draws for one species`);
+  });
+
+  test('near creatures get the detailed mesh, far ones the cheap one', () => {
+    const crowd = new CreatureCrowd(new Scene(), { outlines: false, nearDistance: 40 });
+    const list: Spec[] = [
+      { id: 1, species: 'ROWLET', x: 0, z: -10 },
+      { id: 2, species: 'ROWLET', x: 0, z: -200 },
+    ];
+    crowd.update(list.length, reader(list), makeCamera(), 1 / 60);
+    assert.equal(crowd.stats.near, 1);
+    assert.equal(crowd.stats.far, 1);
+  });
+
+  test('what is behind the camera is not drawn', () => {
+    const crowd = new CreatureCrowd(new Scene(), { outlines: false });
+    const list: Spec[] = [
+      { id: 1, species: 'LITTEN', x: 0, z: -20 },
+      { id: 2, species: 'LITTEN', x: 0, z: 40 },
+    ];
+    crowd.update(list.length, reader(list), makeCamera(), 1 / 60);
+    assert.equal(crowd.stats.drawn, 1);
+    assert.equal(crowd.stats.culled, 1);
+  });
+
+  test('the visible cap keeps the nearest', () => {
+    const crowd = new CreatureCrowd(new Scene(), { outlines: false, maxVisible: 5, nearDistance: 1000 });
+    const list: Spec[] = Array.from({ length: 20 }, (_, i) => ({ id: i, species: 'YUNGOOS', x: 0, z: -5 - i * 10 }));
+    crowd.update(list.length, reader(list), makeCamera(), 1 / 60);
+    assert.equal(crowd.stats.drawn, 5);
+  });
+
+  test('the Pokemon being battled is hidden from the crowd', () => {
+    const crowd = new CreatureCrowd(new Scene(), { outlines: false });
+    const list: Spec[] = [{ id: 7, species: 'GRUBBIN', x: 0, z: -10 }, { id: 8, species: 'GRUBBIN', x: 1, z: -10 }];
+    crowd.hidden.add(7);
+    crowd.update(list.length, reader(list), makeCamera(), 1 / 60);
+    assert.equal(crowd.stats.drawn, 1);
+  });
+
+  test('batches grow past their initial capacity', () => {
+    const crowd = new CreatureCrowd(new Scene(), { outlines: false, maxVisible: 500, nearDistance: 5000 });
+    const list: Spec[] = Array.from({ length: 100 }, (_, i) => ({ id: i, species: 'WINGULL', x: (i % 10) - 5, z: -10 - i }));
+    crowd.update(list.length, reader(list), makeCamera(), 1 / 60);
+    assert.equal(crowd.stats.drawn, 100);
+  });
+
+  test('a creature faces the way the simulation says it is heading', () => {
+    // The sim's yaw 0 faces -Z; the models face +Z. The capsules this replaced
+    // were symmetric, so nothing ever checked.
+    const scene = new Scene();
+    const crowd = new CreatureCrowd(scene, { outlines: false });
+    const list: Spec[] = [{ id: 1, species: 'PIKACHU', x: 0, z: -10 }];
+    crowd.update(1, reader(list), makeCamera(), 1 / 60);
+    const mesh = scene.children.find((c) => c instanceof IMc && c.count > 0) as IMc;
+    const m = new M4c();
+    mesh.getMatrixAt(0, m);
+    const forward = new V3c(0, 0, 1).transformDirection(m);
+    assert.ok(forward.z < -0.99, `model forward is ${forward.toArray()}, expected -Z`);
+  });
+
+  test('instanced copies share geometry buffers but not animation', () => {
+    const source = buildCreature('POPPLIO', 'high').geometry;
+    const a = instancedCopy(source, 4);
+    const b = instancedCopy(source, 4);
+    assert.equal(a.geometry.getAttribute('position'), source.getAttribute('position'), 'positions upload once');
+    assert.notEqual(a.anim, b.anim, 'each user owns its own animation buffer');
+    assert.equal(source.getAttribute('aAnim'), undefined, 'the cached model is never written to');
+  });
+
+  test('a walking creature advances its cycle; a standing one does not', () => {
+    const crowd = new CreatureCrowd(new Scene(), { outlines: false });
+    const moving: Spec[] = [{ id: 1, species: 'GROWLITHE', x: 0, z: -10, speed: 4 }];
+    const still: Spec[] = [{ id: 2, species: 'GROWLITHE', x: 1, z: -10, speed: 0 }];
+    const camera = makeCamera();
+    for (let f = 0; f < 60; f++) {
+      crowd.update(1, reader(moving), camera, 1 / 60);
+      crowd.update(1, reader(still), camera, 1 / 60);
+    }
+    const anim = (crowd as unknown as { anim: Map<number, { cycle: number; gait: number }> }).anim;
+    assert.ok(anim.get(1)!.gait > 0.5, 'a moving creature should be walking');
+    assert.ok(anim.get(2)!.gait < 0.05, 'a still one should be at rest');
+  });
+});
+
+
+// ---------------------------------------------------------------- player
+
+import { buildPlayerModel, humanoidHeight, SKIN_TONES, HAIR_COLORS, type HumanoidLook } from '../src/creatures/index.ts';
+import { CLOTHING, defaultAppearance, defaultOutfit } from '@alola/ui';
+
+describe('Player model', () => {
+  const lookWith = (patch: Partial<HumanoidLook['outfit']> = {}, appearance: Partial<HumanoidLook['appearance']> = {}): HumanoidLook => ({
+    appearance: { ...defaultAppearance(), ...appearance },
+    outfit: { ...defaultOutfit(), ...patch },
+  });
+
+  const colorsOf = (look: HumanoidLook): Set<string> => {
+    const c = buildPlayerModel(look).builder.build().getAttribute('color').array;
+    const out = new Set<string>();
+    for (let i = 0; i < c.length; i += 3) out.add(`${c[i].toFixed(3)},${c[i + 1].toFixed(3)},${c[i + 2].toFixed(3)}`);
+    return out;
+  };
+
+  test('every clothing item in the creator builds, on the ground, within budget', () => {
+    for (const item of CLOTHING) {
+      const { builder } = buildPlayerModel(lookWith({ [item.slot]: item.id }));
+      const g = builder.build();
+      g.computeBoundingBox();
+      assert.ok(g.boundingBox!.min.y > -0.01 && g.boundingBox!.min.y < 0.02, `${item.id}: feet at ${g.boundingBox!.min.y}`);
+      assert.ok((g.getIndex()!.count / 3) < 8000, `${item.id} costs ${g.getIndex()!.count / 3} triangles`);
+    }
+  });
+
+  test('the creator choices actually change the model', () => {
+    // Before this model existed, the creator's choices were saved and never seen.
+    const base = colorsOf(lookWith());
+    const skin = colorsOf(lookWith({}, { skinTone: 12 }));
+    const hair = colorsOf(lookWith({}, { hairColor: 13 }));
+    const top = colorsOf(lookWith({ topColor: 9 }));
+    assert.notDeepEqual([...skin], [...base], 'skin tone must change the model');
+    assert.notDeepEqual([...hair], [...base], 'hair colour must change the model');
+    assert.notDeepEqual([...top], [...base], 'top colour must change the model');
+  });
+
+  test('every hairstyle and body type builds', () => {
+    for (let style = 0; style < 32; style++) {
+      assert.doesNotThrow(() => buildPlayerModel(lookWith({}, { hairStyle: style })).builder.build());
+    }
+    for (let body = 0; body < 6; body++) {
+      assert.doesNotThrow(() => buildPlayerModel(lookWith({}, { bodyType: body })).builder.build());
+    }
+  });
+
+  test('palettes cover every index the creator can produce', () => {
+    assert.equal(SKIN_TONES.length, 16, 'the creator offers 16 skin tones');
+    assert.equal(HAIR_COLORS.length, 20, 'and 20 hair palettes');
+  });
+
+  test('height follows the creator slider', () => {
+    assert.ok(humanoidHeight(4) > humanoidHeight(0));
+    assert.ok(humanoidHeight(0) >= 1.4 && humanoidHeight(4) <= 1.9);
+  });
+
+  test('the player walks: legs and arms swing on the walk cycle', () => {
+    const { rig } = buildPlayerModel(lookWith());
+    assert.equal(rig.bones[Bone.LegBackLeft].motion, Motion.Walk);
+    assert.equal(rig.bones[Bone.ArmLeft].motion, Motion.Walk);
+    assert.notEqual(rig.bones[Bone.LegBackLeft].phase, rig.bones[Bone.LegBackRight].phase, 'legs alternate');
+  });
+});
