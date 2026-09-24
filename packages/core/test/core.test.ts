@@ -360,6 +360,30 @@ describe('SpatialHash', () => {
     assert.deepEqual(near.map((n) => n.id).sort((a, b) => a - b), [24, 25, 26]);
   });
 
+  test('cell storage stays bounded however far things travel', () => {
+    // Regression: cells were never freed, so a session's worth of wandering
+    // made every rebuild walk every cell ever visited.
+    const hash = new SpatialHash<{ id: number; position: { x: number; y: number; z: number } }>(16);
+    const items = Array.from({ length: 50 }, (_, i) => ({ id: i, position: { x: i * 3, y: 0, z: 0 } }));
+    let peak = 0;
+    for (let tick = 0; tick < 2000; tick++) {
+      for (const item of items) item.position.x += 20; // everything marches east
+      hash.rebuild(items);
+      peak = Math.max(peak, hash.cellCount);
+    }
+    // 50 items cover at most 50 cells; one tick of stale cells on top of that.
+    assert.ok(peak <= 100, `cell map grew to ${peak} — it must track occupancy, not history`);
+  });
+
+  test('a cell emptied and refilled on the next tick still works', () => {
+    const hash = new SpatialHash<{ id: number; position: { x: number; y: number; z: number } }>(16);
+    const a = { id: 1, position: { x: 1, y: 0, z: 1 } };
+    hash.rebuild([a]);
+    hash.rebuild([]);
+    hash.rebuild([a]);
+    assert.equal(hash.queryRadius({ x: 1, y: 0, z: 1 }, 2).length, 1);
+  });
+
   test('handles negative coordinates', () => {
     const grid = new SpatialHash<{ id: number; position: { x: number; y: number; z: number } }>(10);
     grid.insert({ id: 1, position: { x: -105, y: 0, z: -205 } });

@@ -14,7 +14,7 @@ import {
   Scene, WebGLRenderer, PerspectiveCamera, DirectionalLight, HemisphereLight,
   Mesh, ShaderMaterial, MeshStandardMaterial, BoxGeometry, SphereGeometry,
   Color, Vector3, Fog, PlaneGeometry, DoubleSide, BackSide, InstancedMesh,
-  Object3D, Matrix4, ConeGeometry, CapsuleGeometry,
+  Object3D, Matrix4, ConeGeometry, CapsuleGeometry, Vector2,
 } from 'three';
 import {
   FixedClock, SpatialHash, vec3, clamp, rotateTowards, type Vec3,
@@ -22,7 +22,7 @@ import {
 import {
   TerrainGenerator, BiomeClassifier, ChunkStreamer, TimeOfDay, WeatherSystem,
   OceanSimulation, Spawner, ambientColorFor, worldToChunk, chunkCenter,
-  CHUNK_SIZE, STREAMING_RADIUS, FAR_TERRAIN_RADIUS, WEATHER_PROFILES,
+  CHUNK_SIZE, STREAMING_RADIUS, FAR_TERRAIN_RADIUS, WEATHER_PROFILES, BUILD_PENDING,
   type ChunkRecord,
 } from '@alola/world';
 import { allIslands, getSpecies, getBiome, islandAt, type WeatherId } from '@alola/data';
@@ -31,12 +31,12 @@ import {
   type BrainState, type BrainWorldView, type PerceivableAgent,
 } from '@alola/ai';
 import {
-  buildTerrainMesh, buildAllFarTerrain, shouldDrawFarTerrain,
+  buildTerrainArrays, geometryFromArrays, buildAllFarTerrain,
   TERRAIN_VERTEX_SHADER, TERRAIN_FRAGMENT_SHADER, defaultTerrainUniforms,
   OCEAN_VERTEX_SHADER, OCEAN_FRAGMENT_SHADER, defaultOceanUniforms, MAX_OCEAN_WAVES,
-  SKY_VERTEX_SHADER, SKY_FRAGMENT_SHADER, defaultSkyUniforms,
+  SKY_VERTEX_SHADER, SKY_FRAGMENT_SHADER, defaultSkyUniforms, lightStepsFor,
   CameraRig, AdaptiveQuality, detectQuality, readRendererString,
-  QUALITY_PRESETS, type QualityPreset,
+  QUALITY_PRESETS, type QualityPreset, type TerrainMeshArrays,
 } from '@alola/render';
 import { AudioDirector } from '@alola/audio';
 import { SaveManager, MemoryStorage, type SaveFile } from '@alola/save';
@@ -51,6 +51,8 @@ import { BattleStage } from './game/battle-stage.ts';
 import { MenuUi } from './game/menu-ui.ts';
 import { askNewGame } from './game/new-game-ui.ts';
 import { Toast, injectGameStyles, el, hpColor } from './game/ui-kit.ts';
+import { FrameProfiler } from './perf/profiler.ts';
+import { TerrainWorkerPool, type TerrainJob } from './perf/terrain-pool.ts';
 
 const WORLD_SEED = 20251115;
 const MAX_VISIBLE_POKEMON = 220;
@@ -115,7 +117,21 @@ function applyQuality(preset: QualityPreset): void {
     sun.shadow.map = null as never;
   }
   sun.castShadow = preset.shadows;
-  skyUniforms.uCloudSteps = { value: preset.cloudSteps };
+
+  // Every field below used to be declared by the preset and read by nothing.
+  // Assigning `.value` rather than replacing the uniform object matters: the
+  // compiled material keeps a reference to the original object, so replacing
+  // it — as the cloud step count once was — silently changes nothing.
+  skyUniforms.uCloudSteps.value = preset.cloudSteps;
+  skyUniforms.uLightSteps.value = lightStepsFor(preset.cloudSteps);
+  streamer.configure({ radiusScale: preset.drawDistanceScale });
+  chunkUploadsPerFrame = preset.chunkBuildsPerFrame;
+  shadowCastLod = preset.shadows ? preset.shadowCastLod : -1;
+  for (const record of streamer.loadedChunks()) {
+    const payload = record.payload as ChunkPayload | null;
+    if (payload) payload.mesh.castShadow = payload.lod <= shadowCastLod;
+  }
+
   const qualityEl = document.getElementById('v-quality');
   if (qualityEl) qualityEl.textContent = `${preset.label} (${rendererString.slice(0, 28)})`;
 }
@@ -163,7 +179,23 @@ const timeOfDay = new TimeOfDay({ secondsPerDay: 24 * 60, startHour: 8 });
 const weather = new WeatherSystem(WORLD_SEED);
 const ocean = new OceanSimulation({ windSpeed: 8 });
 const spawner = new Spawner(WORLD_SEED, terrain, classifier);
-const streamer = new ChunkStreamer({ buildsPerTick: 2, unloadsPerTick: 3 });
+/**
+ * Terrain meshing runs on a pool of Workers. Dispatching a job costs almost
+ * nothing, so the streamer may hand out several per frame; the real per-frame
+ * budget is how many finished meshes are turned into GPU buffers, which the
+ * quality preset sets (`chunkBuildsPerFrame`).
+ */
+const TERRAIN_WORKERS = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1));
+const terrainPool = new TerrainWorkerPool(WORLD_SEED, TERRAIN_WORKERS);
+const streamer = new ChunkStreamer({
+  buildsPerTick: 6,
+  unloadsPerTick: 6,
+  maxInFlight: TERRAIN_WORKERS * 3,
+});
+/** Finished worker meshes uploaded per frame. Set from the quality preset. */
+let chunkUploadsPerFrame = 2;
+/** Chunks at this LOD or finer cast shadows. -1 disables terrain shadows. */
+let shadowCastLod = 0;
 // Rebuilt when the quality preset changes.
 let visiblePokemonCap = MAX_VISIBLE_POKEMON;
 const audio = new AudioDirector();
@@ -206,6 +238,48 @@ adaptive.onChange = (preset) => {
 };
 
 const perceptionGrid = new SpatialHash<PerceivableAgent>(16);
+
+/**
+ * What the perception grid indexes, kept alive between ticks.
+ *
+ * This used to be rebuilt as a fresh array of fresh objects on every
+ * simulation tick — one object per Pokémon, sixty times a second, around
+ * thirteen thousand allocations a second at a full population, all of it
+ * garbage by the next tick. Each record's `position` is a live reference to
+ * the brain's own position, so nothing needs copying: the list only changes
+ * when a Pokémon spawns or leaves.
+ */
+type MutablePerceivable = { -readonly [K in keyof PerceivableAgent]: PerceivableAgent[K] };
+const playerPerceivable: MutablePerceivable = {
+  id: 0, position: vec3(), speciesId: 'PLAYER', packId: -1, playerId: 'local',
+  noise: 0.1, inactive: false, level: 30,
+};
+const perceivableFor = new WeakMap<PokemonBrain, PerceivableAgent>();
+const perceivables: PerceivableAgent[] = [playerPerceivable];
+let perceivablesDirty = true;
+
+function refreshPerceivables(): void {
+  if (!perceivablesDirty) return;
+  perceivables.length = 1;
+  for (const brain of brains) {
+    let record = perceivableFor.get(brain);
+    if (!record) {
+      record = {
+        id: brain.state.id,
+        position: brain.state.position,
+        speciesId: brain.state.speciesId,
+        packId: brain.state.packId,
+        playerId: null,
+        noise: 0.4,
+        inactive: false,
+        level: brain.state.level,
+      };
+      perceivableFor.set(brain, record);
+    }
+    perceivables.push(record);
+  }
+  perceivablesDirty = false;
+}
 const brains: PokemonBrain[] = [];
 let nextAgentId = 1;
 
@@ -284,10 +358,18 @@ const skyMesh = new Mesh(
     uniforms: skyUniforms as never,
     side: BackSide,
     depthWrite: false,
-    depthTest: false,
+    // Depth-tested and drawn after the opaque world. The vertex shader pins
+    // the dome to the far plane, so every pixel already covered by terrain
+    // fails the depth test and is never shaded.
+    //
+    // It used to be drawn first with depth testing off, which ran the full
+    // cloud raymarch on every pixel of the screen and then painted the ground
+    // over most of them. Looking down at the ground in third person, that was
+    // nearly all of the sky's cost, spent on pixels nobody saw.
+    depthTest: true,
   }),
 );
-skyMesh.renderOrder = -1000;
+skyMesh.renderOrder = 1000;
 skyMesh.frustumCulled = false;
 skyMesh.scale.setScalar(FAR_TERRAIN_RADIUS);
 scene.add(skyMesh);
@@ -308,22 +390,60 @@ oceanMesh.frustumCulled = false;
 scene.add(oceanMesh);
 
 /**
- * Terrain material.
+ * Terrain materials.
  *
- * The full shader expects texture arrays that a real content pipeline bakes.
- * Without them, the prototype uses a vertex-coloured standard material driven
- * by biome ground colours — which is enough to read the world's shape, biome
- * boundaries and lighting correctly, and swaps out for the real material with
- * no other change.
+ * Ground colour is baked per vertex (biome blend, rock on steep slopes), so one
+ * material serves every chunk — no per-biome materials, no hard colour change
+ * at a chunk edge, and one fewer state change per chunk drawn.
  */
-function makeTerrainMaterial(): MeshStandardMaterial {
-  return new MeshStandardMaterial({
-    vertexColors: false,
-    roughness: 0.94,
-    metalness: 0.0,
-    color: 0x6d8a4a,
-    flatShading: false,
-  });
+const chunkMaterial = new MeshStandardMaterial({
+  vertexColors: true,
+  roughness: 0.94,
+  metalness: 0.0,
+});
+
+/**
+ * Far terrain is drawn everywhere streaming has not reached: beyond the
+ * streamed radius, at the edges of islands wider than it, and during boot
+ * before the ground has loaded. Inside the *covered* radius it is discarded,
+ * and across a band at the edge it sinks below the streamed surface, so the
+ * handover neither z-fights nor leaves a hole.
+ *
+ * It used to hide the whole island's far mesh the moment the player was on
+ * it — which left the far side of Ula'ula (5.5km across the middle, against a
+ * 3.6km streaming radius) with no ground at all.
+ */
+const farCut = {
+  uCutCentre: { value: new Vector2() },
+  uCutRadius: { value: 0 },
+  uCutBand: { value: 260 },
+};
+
+function makeFarTerrainMaterial(): MeshStandardMaterial {
+  const material = new MeshStandardMaterial({ vertexColors: true, roughness: 0.96, metalness: 0.0 });
+  material.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, farCut);
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `#include <common>
+        uniform vec2 uCutCentre;
+        uniform float uCutRadius;
+        uniform float uCutBand;
+        varying float vCutDistance;`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+        vec2 farWorld = (modelMatrix * vec4(transformed, 1.0)).xz;
+        vCutDistance = distance(farWorld, uCutCentre);
+        float sink = 1.0 - smoothstep(uCutRadius - uCutBand, uCutRadius + uCutBand, vCutDistance);
+        transformed.y -= sink * 28.0;`);
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>
+        uniform float uCutRadius;
+        uniform float uCutBand;
+        varying float vCutDistance;`)
+      .replace('void main() {', `void main() {
+        if (vCutDistance < uCutRadius - uCutBand) discard;`);
+  };
+  material.customProgramCacheKey = () => 'far-terrain-cut';
+  return material;
 }
 
 // ----------------------------------------------------------------- chunks
@@ -333,30 +453,63 @@ interface ChunkPayload {
   lod: number;
 }
 
-const chunkMaterialCache = new Map<string, MeshStandardMaterial>();
-
-function materialForBiome(biomeId: string): MeshStandardMaterial {
-  let material = chunkMaterialCache.get(biomeId);
-  if (!material) {
-    const biome = getBiome(biomeId as never);
-    material = makeTerrainMaterial();
-    material.color = new Color(biome.groundColor[0], biome.groundColor[1], biome.groundColor[2]);
-    chunkMaterialCache.set(biomeId, material);
-  }
-  return material;
-}
-
-function buildChunk(record: ChunkRecord): ChunkPayload {
-  const result = buildTerrainMesh(terrain, classifier, record.cx, record.cz, record.lod);
-  // Use the dominant biome's colour for the whole chunk in the prototype.
-  const dominant = result.biomes[0] ?? 'grassland';
-  const mesh = new Mesh(result.geometry, materialForBiome(dominant));
-  mesh.position.set(record.cx * CHUNK_SIZE, 0, record.cz * CHUNK_SIZE);
+function makeChunkPayload(arrays: TerrainMeshArrays): ChunkPayload {
+  const result = geometryFromArrays(arrays);
+  const mesh = new Mesh(result.geometry, chunkMaterial);
+  mesh.position.set(arrays.cx * CHUNK_SIZE, 0, arrays.cz * CHUNK_SIZE);
   mesh.receiveShadow = true;
-  mesh.castShadow = record.lod <= 1;
+  mesh.castShadow = arrays.lod <= shadowCastLod;
+  mesh.matrixAutoUpdate = false;
+  mesh.updateMatrix();
   scene.add(mesh);
-  return { mesh, lod: record.lod };
+  return { mesh, lod: arrays.lod };
 }
+
+/** Synchronous meshing: the fallback when Workers are unavailable. */
+function meshOnMainThread(job: TerrainJob): ChunkPayload {
+  const t0 = performance.now();
+  const arrays = buildTerrainArrays(terrain, classifier, job.cx, job.cz, job.lod);
+  perf.add('meshing', performance.now() - t0);
+  perf.countChunk();
+  return makeChunkPayload(arrays);
+}
+
+function buildChunk(record: ChunkRecord): unknown {
+  const job: TerrainJob = { key: record.key, cx: record.cx, cz: record.cz, lod: record.lod };
+  if (terrainPool.available) {
+    terrainPool.request(job);
+    return BUILD_PENDING;
+  }
+  return meshOnMainThread(job);
+}
+
+/** Worker-side meshing time, kept separately — it is not main-thread time. */
+let workerMeshingMs = 0;
+
+/**
+ * Turn finished worker results into meshes, within a per-frame budget.
+ *
+ * A result for a chunk that has since unloaded or changed LOD is not turned
+ * into a GPU mesh at all.
+ */
+function applyTerrainResults(budget: number): void {
+  for (const result of terrainPool.drain(budget)) {
+    workerMeshingMs += result.ms;
+    perf.countChunk();
+    const payload = streamer.wants(result.key, result.lod) ? makeChunkPayload(result.arrays) : null;
+    streamer.complete(result.key, result.lod, payload, simTime, disposeChunk);
+  }
+}
+
+// A worker that dies hands its jobs back; they finish on the main thread, and
+// everything after that meshes there too. Terrain must never stop streaming.
+terrainPool.onFailure = (orphans, reason) => {
+  console.warn(`[terrain] ${reason} — meshing on the main thread from now on.`);
+  for (const job of orphans) {
+    const payload = streamer.wants(job.key, job.lod) ? meshOnMainThread(job) : null;
+    streamer.complete(job.key, job.lod, payload, simTime, disposeChunk);
+  }
+};
 
 function disposeChunk(record: ChunkRecord): void {
   const payload = record.payload as ChunkPayload | null;
@@ -457,6 +610,7 @@ function spawnWildlife(): void {
         };
         const brain = new PokemonBrain(state, WORLD_SEED ^ state.id);
         brains.push(brain);
+        perceivablesDirty = true;
         pokemonVisuals.set(state.id, visualFor(brain));
       }
     }
@@ -477,6 +631,7 @@ function despawnDistant(): void {
         pokemonVisuals.delete(brain.state.id);
       }
       brains.splice(i, 1);
+      perceivablesDirty = true;
     }
   }
 }
@@ -558,6 +713,7 @@ function endBattle(finished: BattleSession, outcome: string): void {
         pokemonVisuals.delete(battleAgentId);
       }
       brains.splice(index, 1);
+      perceivablesDirty = true;
     }
   };
 
@@ -736,6 +892,7 @@ playerMesh.castShadow = true;
 scene.add(playerMesh);
 
 const clock = new FixedClock({ tickRate: 60, maxStepsPerFrame: 4 });
+const perf = new FrameProfiler();
 const dom = {
   island: document.getElementById('v-island')!,
   biome: document.getElementById('v-biome')!,
@@ -846,28 +1003,10 @@ function simulate(dt: number): void {
   if (actorsRun) {
     updatePlayer(dt);
 
-    perceptionGrid.rebuild([
-      {
-        id: 0,
-        position: player.position,
-        speciesId: 'PLAYER',
-        packId: -1,
-        playerId: 'local',
-        noise: player.speed > 6 ? 1 : player.speed > 0 ? 0.5 : 0.1,
-        inactive: false,
-        level: 30,
-      },
-      ...brains.map((b) => ({
-        id: b.state.id,
-        position: b.state.position,
-        speciesId: b.state.speciesId,
-        packId: b.state.packId,
-        playerId: null,
-        noise: 0.4,
-        inactive: false,
-        level: b.state.level,
-      })),
-    ]);
+    playerPerceivable.position = player.position;
+    playerPerceivable.noise = player.speed > 6 ? 1 : player.speed > 0 ? 0.5 : 0.1;
+    refreshPerceivables();
+    perceptionGrid.rebuild(perceivables);
 
     const visibility = visibilityFrom(islandWeather.fogDensity, timeOfDay.state.daylight, false);
     const worldView: BrainWorldView = {
@@ -927,6 +1066,10 @@ let sinceSpawnCheck = 0;
 function updateStreaming(frameDt: number): void {
   streamer.setObservers([{ x: player.position.x, z: player.position.z }]);
   streamer.update(simTime, buildChunk, disposeChunk);
+  applyTerrainResults(chunkUploadsPerFrame);
+
+  farCut.uCutCentre.value.set(player.position.x, player.position.z);
+  farCut.uCutRadius.value = streamer.stats.coveredRadius;
 
   sinceSpawnCheck += frameDt;
   if (sinceSpawnCheck >= 1.5 && mode === 'overworld') {
@@ -937,6 +1080,7 @@ function updateStreaming(frameDt: number): void {
 }
 
 function render(alpha: number, frameDt: number): void {
+  perf.begin('prep');
   const island = islandAt(player.position.x, player.position.z);
   const islandId = island?.id ?? 'melemele';
   const islandWeather = weather.get(islandId);
@@ -1001,7 +1145,7 @@ function render(alpha: number, frameDt: number): void {
   // Ocean uniforms — the same wave set the CPU simulation is using.
   const waves = oceanUniforms.uWaves.value as Float32Array;
   waves.set(ocean.toUniformArray().subarray(0, MAX_OCEAN_WAVES * 6));
-  oceanUniforms.uWaveCount.value = Math.min(ocean.waves.length, MAX_OCEAN_WAVES);
+  oceanUniforms.uWaveCount.value = Math.min(ocean.waves.length, MAX_OCEAN_WAVES, quality.oceanWaves);
   oceanUniforms.uTime.value = ocean.elapsed;
   oceanUniforms.uSunDirection.value = [celestial.sunDirX, celestial.sunDirY, celestial.sunDirZ];
   oceanUniforms.uSkyColor.value = [fogColor.r, fogColor.g, fogColor.b];
@@ -1028,7 +1172,10 @@ function render(alpha: number, frameDt: number): void {
     void alpha;
   }
 
+  perf.end('prep');
+  perf.begin('submit');
   renderer.render(scene, camera);
+  perf.end('submit');
 }
 
 function updateHud(dt: number): void {
@@ -1055,7 +1202,9 @@ function updateHud(dt: number): void {
   dom.frame.textContent = `${clock.frameTimeMs.toFixed(1)} ms`;
   dom.draws.textContent = String(renderer.info.render.calls);
   dom.tris.textContent = renderer.info.render.triangles.toLocaleString();
-  dom.chunks.textContent = `${streamer.stats.loaded} (q${streamer.stats.queueDepth})`;
+  dom.chunks.textContent = terrainPool.available
+    ? `${streamer.stats.loaded} (q${streamer.stats.queueDepth}, ${TERRAIN_WORKERS}w)`
+    : `${streamer.stats.loaded} (q${streamer.stats.queueDepth}, main thread)`;
   dom.mons.textContent = String(brains.length);
 
   renderPartyPanel();
@@ -1102,14 +1251,21 @@ function frame(): void {
 
   adaptive.update(frameDt * 1000);
 
+  perf.begin('sim');
   clock.advance(now / 1000, (dt) => simulate(dt));
   updateEncounters(frameDt);
+  perf.end('sim');
   // Streaming keeps running through a battle so the world behind it stays
   // loaded, but nothing new spawns into a fight.
+  perf.begin('streaming');
   updateStreaming(frameDt);
+  perf.end('streaming');
   render(clock.alpha, frameDt);
+  perf.begin('hud');
   updateHud(frameDt);
   updateAutosave(frameDt);
+  perf.end('hud');
+  perf.commit();
 }
 
 /**
@@ -1202,6 +1358,38 @@ async function loadOrCreateProfile(): Promise<void> {
   }
 }
 
+/**
+ * Stream until the player has ground to stand on.
+ *
+ * Only the 3x3 chunks around the player are waited for: the rest streams in
+ * over the following frames without stalling anything, and the far-terrain
+ * mesh fills in wherever it has not arrived yet.
+ */
+async function streamGround(timeoutMs: number): Promise<void> {
+  const deadline = performance.now() + timeoutMs;
+  const { cx, cz } = worldToChunk(player.position.x, player.position.z);
+  streamer.setObservers([{ x: player.position.x, z: player.position.z }]);
+  let t = 0;
+
+  while (performance.now() < deadline) {
+    streamer.update(t, buildChunk, disposeChunk);
+    applyTerrainResults(16);
+    t += 0.016;
+
+    let grounded = true;
+    for (let dz = -1; dz <= 1 && grounded; dz++) {
+      for (let dx = -1; dx <= 1 && grounded; dx++) {
+        if (!streamer.isReady(cx + dx, cz + dz)) grounded = false;
+      }
+    }
+    const loaded = streamer.stats.loaded;
+    await reportBoot(60 + Math.min(24, loaded / 2), `streaming ground (${loaded} chunks)`);
+    if (grounded) break;
+  }
+  farCut.uCutCentre.value.set(player.position.x, player.position.z);
+  farCut.uCutRadius.value = streamer.stats.coveredRadius;
+}
+
 async function boot(): Promise<void> {
   await reportBoot(5, `detecting hardware (${rendererString.slice(0, 40)})`);
   applyQuality(adaptive.preset);
@@ -1213,25 +1401,18 @@ async function boot(): Promise<void> {
 
   await reportBoot(30, 'building distant islands');
   const farMeshes = buildAllFarTerrain(terrain, classifier);
+  const farMaterial = makeFarTerrainMaterial();
   for (const far of farMeshes) {
-    const island = allIslands().find((i) => i.id === far.islandId)!;
-    const mesh = new Mesh(far.geometry, makeTerrainMaterial());
+    const mesh = new Mesh(far.geometry, farMaterial);
     mesh.position.set(far.originX, 0, far.originZ);
     mesh.receiveShadow = false;
     mesh.castShadow = false;
     mesh.userData.islandId = far.islandId;
     scene.add(mesh);
-    // Hidden when the player is standing on this island's streamed chunks.
-    mesh.onBeforeRender = (): void => {
-      mesh.visible = shouldDrawFarTerrain(camera.position.x, camera.position.z, island);
-    };
   }
 
   await reportBoot(60, 'streaming ground');
-  streamer.setObservers([{ x: player.position.x, z: player.position.z }]);
-  for (let i = 0; i < 40; i++) {
-    streamer.update(i * 0.016, buildChunk, disposeChunk);
-  }
+  await streamGround(30000);
 
   await reportBoot(85, 'populating Alola');
   spawnWildlife();
@@ -1266,5 +1447,11 @@ Object.assign(window as unknown as Record<string, unknown>, {
     get session() { return session; },
     get mode() { return mode; },
     saveGame,
+    perf,
+    renderer,
+    adaptive,
+    camera,
+    terrainPool,
+    get workerMeshingMs() { return workerMeshingMs; },
   },
 });

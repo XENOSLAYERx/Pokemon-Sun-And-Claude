@@ -152,7 +152,10 @@ export function detectQuality(params: {
   if (memory <= 4 || cores <= 2) return 'low';
   // The Steam Deck reports 8 cores and a 1280-wide screen.
   if (width <= 1366 || cores <= 8) return 'medium';
-  if (memory >= 16 && cores >= 12 && width >= 2560) return 'ultra';
+  // Never 'ultra' automatically. Core count, memory and screen width say
+  // nothing about the GPU, and a 16-core laptop on integrated graphics driving
+  // a 1440p panel matches every one of them. Ultra doubles the pixel count and
+  // quadruples the shadow map; a player who has the GPU for it can choose it.
   return 'high';
 }
 

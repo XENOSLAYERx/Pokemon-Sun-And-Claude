@@ -22,6 +22,7 @@ import { BufferGeometry, BufferAttribute, Float32BufferAttribute, Sphere, Vector
 import { STREAMING_RADIUS, type TerrainGenerator, type BiomeClassifier } from '@alola/world';
 import { allIslands, type IslandDefinition } from '@alola/data';
 import { biomeIndex } from './terrain-mesh.ts';
+import { writeGroundColor } from './terrain-arrays.ts';
 
 /** Metres between far-terrain vertices. */
 export const FAR_VERTEX_SPACING = 64;
@@ -60,6 +61,7 @@ export function buildFarTerrain(
   const positions = new Float32Array(vertexCount * 3);
   const normals = new Float32Array(vertexCount * 3);
   const uvs = new Float32Array(vertexCount * 2);
+  const colors = new Float32Array(vertexCount * 3);
   const biomeWeights = new Float32Array(vertexCount * 4);
   const biomeIndices = new Float32Array(vertexCount * 4);
 
@@ -83,6 +85,8 @@ export function buildFarTerrain(
       normals[o3] = sample.normalX;
       normals[o3 + 1] = sample.normalY;
       normals[o3 + 2] = sample.normalZ;
+
+      writeGroundColor(colors, o3, classification, sample.normalY, sample.height);
 
       const o2 = vi * 2;
       uvs[o2] = ix / resolution;
@@ -129,6 +133,7 @@ export function buildFarTerrain(
   geometry.setAttribute('position', new Float32BufferAttribute(positions, 3));
   geometry.setAttribute('normal', new Float32BufferAttribute(normals, 3));
   geometry.setAttribute('uv', new Float32BufferAttribute(uvs, 2));
+  geometry.setAttribute('color', new Float32BufferAttribute(colors, 3));
   geometry.setAttribute('biomeWeight', new Float32BufferAttribute(biomeWeights, 4));
   geometry.setAttribute('biomeIndex', new Float32BufferAttribute(biomeIndices, 4));
   geometry.setIndex(new BufferAttribute(indices, 1));

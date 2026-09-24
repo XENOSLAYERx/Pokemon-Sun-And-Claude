@@ -137,7 +137,25 @@ export interface StreamingStats {
   builtThisTick: number;
   unloadedThisTick: number;
   queueDepth: number;
+  /** Asynchronous builds dispatched and not yet completed. */
+  inFlight: number;
+  /** Async results that arrived for a chunk that no longer wanted them. */
+  discarded: number;
+  /**
+   * Radius around the nearest observer inside which every chunk has geometry.
+   * Grows from zero while streaming catches up; equals the streaming radius
+   * once it has. The far-terrain mesh fills everything beyond it.
+   */
+  coveredRadius: number;
 }
+
+/**
+ * Returned by a `build` callback that has handed the work off (to a Worker)
+ * rather than finishing it. The chunk stays `Building` — with its previous
+ * payload still live, so the player never sees a hole — until `complete()` is
+ * called with the result.
+ */
+export const BUILD_PENDING: unique symbol = Symbol('chunk-build-pending');
 
 export interface StreamerOptions {
   /** Max chunks to start building per tick. The frame-time guard. */
@@ -148,6 +166,14 @@ export interface StreamerOptions {
   unloadGraceSeconds?: number;
   /** Extra distance beyond the outermost LOD ring before unloading. */
   unloadHysteresis?: number;
+  /**
+   * Max asynchronous builds outstanding at once. Bounds memory and keeps the
+   * nearest chunks from queueing behind a backlog of far ones that were
+   * dispatched when the player was somewhere else.
+   */
+  maxInFlight?: number;
+  /** Multiplier on every LOD ring — the quality preset's draw distance. */
+  radiusScale?: number;
 }
 
 /**
@@ -161,14 +187,18 @@ export class ChunkStreamer {
   private buildQueue: ChunkRecord[] = [];
   private observers: { x: number; z: number }[] = [];
 
-  private readonly buildsPerTick: number;
+  private buildsPerTick: number;
   private readonly unloadsPerTick: number;
   private readonly unloadGrace: number;
   private readonly unloadHysteresis: number;
+  private readonly maxInFlight: number;
+  private radiusScale: number;
+  private inFlight = 0;
 
   stats: StreamingStats = {
     loaded: 0, queued: 0, building: 0,
     builtThisTick: 0, unloadedThisTick: 0, queueDepth: 0,
+    inFlight: 0, discarded: 0, coveredRadius: 0,
   };
 
   constructor(opts: StreamerOptions = {}) {
@@ -176,6 +206,23 @@ export class ChunkStreamer {
     this.unloadsPerTick = opts.unloadsPerTick ?? 4;
     this.unloadGrace = opts.unloadGraceSeconds ?? 8;
     this.unloadHysteresis = opts.unloadHysteresis ?? CHUNK_SIZE * 2;
+    this.maxInFlight = opts.maxInFlight ?? 8;
+    this.radiusScale = opts.radiusScale ?? 1;
+  }
+
+  /**
+   * Apply a quality preset. Takes effect on the next update: a smaller radius
+   * lets distant chunks age out through the normal unload path rather than
+   * vanishing all at once.
+   */
+  configure(opts: { buildsPerTick?: number; radiusScale?: number }): void {
+    if (opts.buildsPerTick !== undefined) this.buildsPerTick = Math.max(1, Math.floor(opts.buildsPerTick));
+    if (opts.radiusScale !== undefined) this.radiusScale = Math.max(0.1, opts.radiusScale);
+  }
+
+  /** The outermost streamed radius after the draw-distance scale. */
+  get streamingRadius(): number {
+    return LOD_RADII[MAX_LOD] * this.radiusScale;
   }
 
   /**
@@ -196,7 +243,7 @@ export class ChunkStreamer {
    */
   lodFor(distance: number, currentLod = -1): number {
     for (let i = 0; i < LOD_RADII.length; i++) {
-      let radius = LOD_RADII[i];
+      let radius = LOD_RADII[i] * this.radiusScale;
       // Widen the ring we are already in.
       if (currentLod === i) radius *= 1.08;
       if (distance <= radius) return i;
@@ -232,7 +279,7 @@ export class ChunkStreamer {
 
     if (this.observers.length === 0) return;
 
-    const maxRadius = LOD_RADII[MAX_LOD];
+    const maxRadius = this.streamingRadius;
     const chunkRadius = Math.ceil(maxRadius / CHUNK_SIZE);
 
     // 1. Mark every chunk that should exist, queueing new ones.
@@ -274,11 +321,14 @@ export class ChunkStreamer {
       rec.distance = dist;
       if (dist <= maxRadius) rec.lastSeenAt = now;
 
-      if (rec.state === ChunkState.Ready) {
+      if (rec.state === ChunkState.Ready || rec.state === ChunkState.Building) {
         const wanted = this.lodFor(dist, rec.lod);
         if (wanted !== rec.lod) {
           // Re-queue at the new detail level. The old payload stays live until
-          // the new one is ready, so the player never sees a hole.
+          // the new one is ready, so the player never sees a hole. A build
+          // already in flight at the old level is left to finish; its result
+          // no longer matches `rec.lod`, so `complete()` discards it.
+          if (rec.state === ChunkState.Building) this.inFlight--;
           rec.lod = wanted;
           rec.state = ChunkState.Queued;
           this.buildQueue.push(rec);
@@ -291,22 +341,34 @@ export class ChunkStreamer {
     this.buildQueue.sort((a, b) => a.distance - b.distance);
 
     let built = 0;
-    while (this.buildQueue.length > 0 && built < this.buildsPerTick) {
+    while (
+      this.buildQueue.length > 0 &&
+      built < this.buildsPerTick &&
+      this.inFlight < this.maxInFlight
+    ) {
       const rec = this.buildQueue.shift()!;
       // The chunk may have been unloaded while queued.
-      if (!this.chunks.has(rec.key)) continue;
+      if (this.chunks.get(rec.key) !== rec) continue;
       if (rec.state !== ChunkState.Queued) continue;
 
       rec.state = ChunkState.Building;
+      const result = build(rec);
+      built++;
+      this.stats.builtThisTick++;
+
+      if (result === BUILD_PENDING) {
+        // Handed off. The previous payload stays attached and visible.
+        this.inFlight++;
+        continue;
+      }
+
       const previous = rec.payload;
-      rec.payload = build(rec);
+      rec.payload = result;
       if (previous !== null && previous !== rec.payload) {
         dispose({ ...rec, payload: previous });
       }
       rec.state = ChunkState.Ready;
       rec.readyAt = now;
-      built++;
-      this.stats.builtThisTick++;
     }
 
     // 4. Unload chunks nobody has needed for a while.
@@ -314,10 +376,12 @@ export class ChunkStreamer {
     const unloadDistance = maxRadius + this.unloadHysteresis;
     for (const [key, rec] of this.chunks) {
       if (unloaded >= this.unloadsPerTick) break;
-      if (rec.state === ChunkState.Building) continue;
       if (rec.distance <= unloadDistance) continue;
       if (now - rec.lastSeenAt < this.unloadGrace) continue;
 
+      // A chunk still building can be dropped too: its eventual result finds
+      // no record in `complete()` and is disposed there.
+      if (rec.state === ChunkState.Building) this.inFlight--;
       if (rec.payload !== null) dispose(rec);
       this.chunks.delete(key);
       unloaded++;
@@ -326,15 +390,78 @@ export class ChunkStreamer {
 
     // 5. Refresh stats.
     let loaded = 0, queued = 0, building = 0;
+    // A chunk mid-rebuild still has its old payload on screen, so it counts as
+    // covered; only a chunk with nothing to show yet limits the radius.
+    let nearestUncovered = Infinity;
     for (const rec of this.chunks.values()) {
       if (rec.state === ChunkState.Ready) loaded++;
       else if (rec.state === ChunkState.Queued) queued++;
       else if (rec.state === ChunkState.Building) building++;
+      if (rec.payload === null && rec.state !== ChunkState.Ready && rec.distance < nearestUncovered) {
+        nearestUncovered = rec.distance;
+      }
     }
+    // The uncovered chunk's nearest edge is up to half a diagonal closer than
+    // its centre.
+    const halfDiagonal = CHUNK_SIZE * Math.SQRT1_2;
+    this.stats.coveredRadius = nearestUncovered === Infinity
+      ? maxRadius
+      : Math.max(0, Math.min(maxRadius, nearestUncovered - halfDiagonal));
     this.stats.loaded = loaded;
     this.stats.queued = queued;
     this.stats.building = building;
     this.stats.queueDepth = this.buildQueue.length;
+    this.stats.inFlight = this.inFlight;
+  }
+
+  /**
+   * Would `complete()` accept a result for this chunk at this LOD?
+   *
+   * Lets the caller skip turning a stale result into a GPU mesh at all, rather
+   * than building one only to have it disposed a line later.
+   */
+  wants(key: ChunkKey, lod: number): boolean {
+    const rec = this.chunks.get(key);
+    return rec !== undefined && rec.state === ChunkState.Building && rec.lod === lod;
+  }
+
+  /**
+   * Deliver the result of a build that returned `BUILD_PENDING`.
+   *
+   * Results can arrive for a chunk that has since been unloaded, or re-queued
+   * at a different LOD because the player moved while the Worker was busy.
+   * Both are handed straight back to `dispose` rather than attached — attaching
+   * a stale LOD would leave a low-detail chunk under the player's feet until
+   * something happened to rebuild it. Returns whether the payload was used.
+   */
+  complete(
+    key: ChunkKey,
+    lod: number,
+    payload: unknown,
+    now: number,
+    dispose: (record: ChunkRecord) => void,
+  ): boolean {
+    const rec = this.chunks.get(key);
+    if (!rec || rec.state !== ChunkState.Building || rec.lod !== lod) {
+      this.stats.discarded++;
+      dispose({
+        key, cx: chunkCoordX(key), cz: chunkCoordZ(key),
+        state: ChunkState.Unloaded, lod, distance: Infinity,
+        readyAt: now, lastSeenAt: now, payload,
+      });
+      return false;
+    }
+
+    this.inFlight--;
+    this.stats.inFlight = this.inFlight;
+    const previous = rec.payload;
+    rec.payload = payload;
+    if (previous !== null && previous !== payload) {
+      dispose({ ...rec, payload: previous });
+    }
+    rec.state = ChunkState.Ready;
+    rec.readyAt = now;
+    return true;
   }
 
   get(cx: number, cz: number): ChunkRecord | undefined {
@@ -362,5 +489,8 @@ export class ChunkStreamer {
     }
     this.chunks.clear();
     this.buildQueue.length = 0;
+    // Anything still on a Worker comes back to `complete()`, finds no record,
+    // and is disposed there.
+    this.inFlight = 0;
   }
 }

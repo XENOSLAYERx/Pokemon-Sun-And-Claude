@@ -1,6 +1,10 @@
 /** @alola/render — Three.js presentation layer. */
-export { buildTerrainMesh, triangleCountForLod, biomeIndex } from './pipeline/terrain-mesh.ts';
-export type { TerrainMeshResult, MeshOptions } from './pipeline/terrain-mesh.ts';
+export {
+  buildTerrainMesh, geometryFromArrays, triangleCountForLod, biomeIndex,
+} from './pipeline/terrain-mesh.ts';
+export type { TerrainMeshResult } from './pipeline/terrain-mesh.ts';
+export { buildTerrainArrays, transferablesOf } from './pipeline/terrain-arrays.ts';
+export type { TerrainMeshArrays, MeshOptions } from './pipeline/terrain-arrays.ts';
 
 export {
   buildFarTerrain, buildAllFarTerrain, shouldDrawFarTerrain,
@@ -15,7 +19,7 @@ export {
   OCEAN_VERTEX_SHADER, OCEAN_FRAGMENT_SHADER, defaultOceanUniforms, MAX_OCEAN_WAVES,
 } from './shaders/ocean.glsl.ts';
 export {
-  SKY_VERTEX_SHADER, SKY_FRAGMENT_SHADER, defaultSkyUniforms,
+  SKY_VERTEX_SHADER, SKY_FRAGMENT_SHADER, defaultSkyUniforms, lightStepsFor,
 } from './shaders/sky.glsl.ts';
 
 export {

@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { Vector3 } from 'three';
 import { TerrainGenerator, BiomeClassifier, CHUNK_SIZE, LOD_RESOLUTIONS } from '@alola/world';
 import { allIslands } from '@alola/data';
-import { buildTerrainMesh, triangleCountForLod, biomeIndex } from '../src/pipeline/terrain-mesh.ts';
+import { buildTerrainMesh, triangleCountForLod, biomeIndex, geometryFromArrays } from '../src/pipeline/terrain-mesh.ts';
+import { buildTerrainArrays, transferablesOf } from '../src/pipeline/terrain-arrays.ts';
 import {
   scatterFoliage, instanceBudgetFor, selectForBudget, cullInstances,
 } from '../src/instancing/scatter.ts';
@@ -15,7 +16,7 @@ import {
 import {
   OCEAN_VERTEX_SHADER, OCEAN_FRAGMENT_SHADER, defaultOceanUniforms, MAX_OCEAN_WAVES,
 } from '../src/shaders/ocean.glsl.ts';
-import { SKY_VERTEX_SHADER, SKY_FRAGMENT_SHADER, defaultSkyUniforms } from '../src/shaders/sky.glsl.ts';
+import { SKY_VERTEX_SHADER, SKY_FRAGMENT_SHADER, defaultSkyUniforms, lightStepsFor } from '../src/shaders/sky.glsl.ts';
 import {
   QUALITY_PRESETS, QUALITY_ORDER, AdaptiveQuality, detectQuality, isSoftwareRenderer,
 } from '../src/pipeline/quality.ts';
@@ -440,8 +441,31 @@ describe('Shaders', () => {
   });
 
   test('the sky shader bounds its raymarch loop', () => {
-    assert.ok(SKY_FRAGMENT_SHADER.includes('const int STEPS'), 'cloud march must have a fixed step count');
+    assert.ok(SKY_FRAGMENT_SHADER.includes('const int MAX_CLOUD_STEPS'), 'the march needs a compile-time ceiling');
+    assert.ok(SKY_FRAGMENT_SHADER.includes('i >= uCloudSteps'), 'and must stop at the preset budget');
     assert.ok(SKY_FRAGMENT_SHADER.includes('transmittance < 0.02'), 'should early-out when opaque');
+  });
+
+  test('the cloud budget comes from the preset, not a constant', () => {
+    // It used to be `const int STEPS = 24` while the preset's cloudSteps went
+    // into a uniform nothing read — every preset paid for 24 steps.
+    assert.ok(SKY_FRAGMENT_SHADER.includes('uniform int uCloudSteps'));
+    assert.ok(!/const int STEPS\s*=/.test(SKY_FRAGMENT_SHADER), 'no hardcoded step count may remain');
+    const potato = QUALITY_PRESETS.potato.cloudSteps;
+    assert.equal(potato, 0);
+    assert.ok(SKY_FRAGMENT_SHADER.includes('uCloudSteps > 0'), 'a zero budget must skip the march entirely');
+  });
+
+  test('light samples scale down with the cloud budget', () => {
+    assert.equal(lightStepsFor(0), 0);
+    assert.equal(lightStepsFor(8), 1);
+    assert.equal(lightStepsFor(16), 2);
+    assert.equal(lightStepsFor(40), 3);
+    for (let i = 1; i < QUALITY_ORDER.length; i++) {
+      assert.ok(
+        lightStepsFor(QUALITY_PRESETS[QUALITY_ORDER[i]].cloudSteps) >= lightStepsFor(QUALITY_PRESETS[QUALITY_ORDER[i - 1]].cloudSteps),
+      );
+    }
   });
 });
 
@@ -519,7 +543,13 @@ describe('Graphics quality presets', () => {
     );
     assert.equal(
       detectQuality({ rendererString: 'NVIDIA GeForce RTX 4090', hardwareConcurrency: 16, deviceMemoryGb: 32, screenWidth: 3840 }),
-      'ultra',
+      'high',
+      'ultra is opt-in: CPU cores and screen width say nothing about the GPU',
+    );
+    assert.equal(
+      detectQuality({ rendererString: 'Intel(R) Iris(R) Xe Graphics', hardwareConcurrency: 16, deviceMemoryGb: 16, screenWidth: 2560 }),
+      'high',
+      'the case the cap exists for: many cores, big screen, integrated GPU',
     );
     assert.equal(
       detectQuality({ rendererString: 'Mali-G57', hardwareConcurrency: 2, deviceMemoryGb: 3, screenWidth: 1080 }),
@@ -573,5 +603,64 @@ describe('Graphics quality presets', () => {
     adaptive.unlock();
     for (let i = 0; i < 301; i++) adaptive.update(6);
     assert.equal(adaptive.current, 'medium', 'adaptation resumes once unlocked');
+  });
+});
+
+// ------------------------------------------------------- worker meshing path
+
+describe('Worker meshing path', () => {
+  test('a separate generator instance produces byte-identical arrays', () => {
+    // The worker builds its own TerrainGenerator from the seed. That is only
+    // safe because terrain is a pure function of (seed, x, z) — this pins it.
+    const workerTerrain = new TerrainGenerator(SEED);
+    const workerClassifier = new BiomeClassifier();
+    for (const lod of [0, 2]) {
+      const a = buildTerrainArrays(terrain, classifier, CHUNK_X, CHUNK_Z, lod);
+      const b = buildTerrainArrays(workerTerrain, workerClassifier, CHUNK_X, CHUNK_Z, lod);
+      assert.deepEqual(a.positions, b.positions);
+      assert.deepEqual(a.normals, b.normals);
+      assert.deepEqual(a.biomeIndices, b.biomeIndices);
+      assert.deepEqual(a.indices, b.indices);
+    }
+  });
+
+  test('geometry from arrays matches the synchronous build', () => {
+    const sync = buildTerrainMesh(terrain, classifier, CHUNK_X, CHUNK_Z, 1);
+    const viaArrays = geometryFromArrays(buildTerrainArrays(terrain, classifier, CHUNK_X, CHUNK_Z, 1));
+    assert.deepEqual(
+      viaArrays.geometry.getAttribute('position').array,
+      sync.geometry.getAttribute('position').array,
+    );
+    assert.equal(viaArrays.vertexCount, sync.vertexCount);
+    assert.equal(viaArrays.geometry.boundingSphere?.radius, sync.geometry.boundingSphere?.radius);
+  });
+
+  test('wrapping worker arrays in a geometry does not copy them', () => {
+    const arrays = buildTerrainArrays(terrain, classifier, CHUNK_X, CHUNK_Z, 2);
+    const { geometry } = geometryFromArrays(arrays);
+    assert.equal(geometry.getAttribute('position').array, arrays.positions,
+      'the attribute must adopt the transferred array, not duplicate it');
+    assert.equal(geometry.getAttribute('color').array, arrays.colors);
+    assert.equal(geometry.getIndex()?.array, arrays.indices);
+  });
+
+  test('every buffer is listed as transferable, and none is shared', () => {
+    const arrays = buildTerrainArrays(terrain, classifier, CHUNK_X, CHUNK_Z, 3);
+    const buffers = transferablesOf(arrays);
+    assert.equal(buffers.length, 7);
+    assert.equal(new Set(buffers).size, 7, 'transferring the same buffer twice throws in postMessage');
+  });
+
+  test('the first biome listed really is the dominant one', () => {
+    const arrays = buildTerrainArrays(terrain, classifier, CHUNK_X, CHUNK_Z, 2);
+    const counts = new Map<number, number>();
+    const gridVerts = (LOD_RESOLUTIONS[2] + 1) ** 2;
+    for (let v = 0; v < gridVerts; v++) {
+      const id = arrays.biomeIndices[v * 4];
+      counts.set(id, (counts.get(id) ?? 0) + 1);
+    }
+    const dominant = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+    assert.equal(biomeIndex(arrays.biomes[0]), dominant,
+      'the chunk material is chosen from biomes[0], so it must be the majority biome');
   });
 });

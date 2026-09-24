@@ -49,9 +49,25 @@ export class SpatialHash<T extends SpatialItem> {
   }
 
   clear(): void {
-    // Reuse the arrays: this runs every tick and would otherwise churn GC hard.
-    for (const list of this.cells.values()) list.length = 0;
+    // Reuse the arrays of cells that were occupied: this runs every tick and
+    // would otherwise churn GC hard. But drop cells that were already empty —
+    // nobody used them for a whole tick.
+    //
+    // Without that second half the map only ever grew. Every cell any Pokémon
+    // had ever stood in stayed in it, and this loop walked all of them every
+    // tick, so the cost of a clear scaled with the distance travelled this
+    // session rather than with the population: the game got slower the longer
+    // it was played.
+    for (const [key, list] of this.cells) {
+      if (list.length === 0) this.cells.delete(key);
+      else list.length = 0;
+    }
     this.itemCount = 0;
+  }
+
+  /** Cells currently allocated. Diagnostics, and the leak regression test. */
+  get cellCount(): number {
+    return this.cells.size;
   }
 
   insert(item: T): void {
