@@ -23,7 +23,7 @@ shipping a missed criterion is how a project loses the ability to plan.
 
 | # | Criterion | Result |
 |---|---|---|
-| 1 | Simulation runs headless with no rendering dependency | ✅ 504 tests, no browser |
+| 1 | Simulation runs headless with no rendering dependency | ✅ 553 tests, no browser |
 | 2 | Terrain is deterministic and streamable | ✅ verified across generators |
 | 3 | AI produces distinct behaviours at scale | ✅ 208 agents, 8 goal types observed |
 | 4 | Battle engine is deterministic | ✅ identical event logs per seed |
@@ -42,7 +42,7 @@ shipping a missed criterion is how a project loses the ability to plan.
 | `terrain.sample` | 6.15µs |
 | Content bake | 135 KB in 26ms |
 | Client bundle | 158 KB game + 522 KB Three.js |
-| Test suite | 504 tests, ~1.7s |
+| Test suite | 553 tests, ~2s |
 
 ---
 

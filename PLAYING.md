@@ -146,6 +146,39 @@ Wi-Fi. There are no touch controls, so you'll want a keyboard.
 
 ---
 
+## Using your own models
+
+Every Pokémon and the player already has a 3D model, built in code — you don't
+need to download anything. To see them all, open
+<http://localhost:5173/models.html> (add `?walk` to watch them move).
+
+If you have `.glb` models you'd rather use (made yourself, or ones whose licence
+lets you use them), put them in `apps/client/public/models/` and list them in
+`manifest.json` there:
+
+```json
+{
+  "player": "trainer.glb",
+  "species": { "PIKACHU": "pikachu.glb" }
+}
+```
+
+Reload and they replace the built-in ones, in the world and in battle. Size and
+position are fixed up automatically; animations named *idle*, *walk* or *run*
+are used if the file has them. A file that fails to load is skipped with a
+notice and the built-in model stays. Pictures alone won't work — it needs a 3D
+model file.
+
+To start from the built-in models in Blender:
+
+```bash
+npm run models:export -- PIKACHU LAPRAS --player   # or --all
+```
+
+Details in [`apps/client/public/models/README.md`](apps/client/public/models/README.md).
+
+---
+
 ## Making a shareable build
 
 ```bash
@@ -167,8 +200,10 @@ There is no backend.
 
 This is a working vertical slice, not a finished product. In particular:
 
-- **Every Pokémon is a coloured capsule.** There are no art assets. The colour
-  is its primary type.
+- **The models are built in code, not hand-made art.** Each species has its
+  own recognisable shape, colours and animation, but they are simple and toon-
+  shaded rather than detailed. Grass, trees and buildings aren't in yet, so the
+  ground is bare.
 - **No trainers, no evolution, no shops, no story.** Wild battles, catching and
   levelling work; the trials and quests exist as tested systems with nothing
   authored in front of them yet.
@@ -176,6 +211,6 @@ This is a working vertical slice, not a finished product. In particular:
   driving the ocean, and Pokémon that hunt, flock, sleep and defend territory
   whether or not you're watching.
 
-`npm test` runs 504 tests in a couple of seconds if you want to see the
+`npm test` runs 553 tests in a couple of seconds if you want to see the
 machinery underneath. [`docs/README.md`](docs/README.md) explains how all of it
 works.

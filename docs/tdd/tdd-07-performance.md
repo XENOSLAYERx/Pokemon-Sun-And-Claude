@@ -140,6 +140,64 @@ function updateStreaming(frameDt: number): void {
 }
 ```
 
+### 7. Frame-time profiling, and what it found
+
+FPS in this container measures the software rasteriser, so it cannot say whether
+the game stutters. `apps/client/src/perf/profiler.ts` times the **main thread**
+instead, per phase (`sim`, `meshing`, `streaming`, `prep`, `submit`, `hud`),
+and reports p50 / p95 / p99 / max. Main-thread time is what decides whether a
+frame is late on real hardware, and unlike GPU time it can be measured here.
+
+The benchmark runs the `medium` preset for 40 frames standing still, then 90
+frames moving 28m per frame — deliberately harsher than any mount — so that
+streaming has to keep up. Main thread, milliseconds, p50 / p95 / max:
+
+| | standing | moving | worst phase while moving |
+|---|---|---|---|
+| Before | 6.4 / 10.4 / 12.5 | 10.4 / **33.8 / 50.4** | meshing 8.1 / 29.0 / 43.5 |
+| Terrain meshing on Workers | 3.0 / 13.3 / 17.5 | 2.6 / 7.6 / 14.2 | streaming 0.7 / 4.9 / 6.5 |
+| + real Pokémon models | 3.0 / 10.4 / 24.7 | 2.4 / 6.7 / 23.6 | submit max 21.8 (shader compile) |
+| + models warmed at load | 2.9–3.5 / 6.3–10.0 / 8.4–13.0 | 2.4–2.7 / 6.3–7.7 / **11.7–12.5** | sim, max 6.0–10.2 |
+
+The last row is the range over three runs; the others are single runs. Draw
+calls standing still went from 116 to 42 over the same period, with 53 detailed
+models in place of capsules.
+
+**Terrain meshing moved to a Worker pool** (`apps/client/src/workers/`,
+`perf/terrain-pool.ts`). `buildTerrainArrays` has no Three.js dependency, so a
+Worker produces the typed arrays, transfers them without copying, and the main
+thread only wraps them in a `BufferGeometry`. The streamer learned asynchronous
+builds for this: `BUILD_PENDING`, `complete()`, an in-flight cap, and
+`coveredRadius`, which the far terrain uses to sink itself out from under
+streamed chunks instead of z-fighting them. 2.1 seconds of meshing per benchmark
+run now happens on three Workers.
+
+**`Float32BufferAttribute` copies.** Its constructor wraps the input in
+`new Float32Array(array)`, which put ~1.5MB of memcpy per LOD0 chunk back on the
+main thread after the Worker had transferred the same buffer to avoid exactly
+that. `BufferAttribute` wraps without copying.
+
+**The sky was drawn first, under everything.** It raymarched clouds for every
+pixel, then the terrain overwrote most of them. It is now drawn last, at the far
+plane with the depth test on, so it shades only the pixels nothing else covers.
+The cloud and light step counts are uniforms driven by the preset; previously
+the preset assigned a new uniform object, which the compiled material never saw.
+
+**One-off work landing in gameplay frames.** With real models, a species' mesh
+was built (1–14ms) the first frame one came into view, and the outline and
+shadow-depth shaders compiled the first frame a Pokémon came close after the
+preset enabled them — including when adaptive quality changed preset mid-game.
+`CreatureCrowd.prewarm()` queues every batch to be submitted once with a
+zero-scale instance: compiled and uploaded, drawing nothing. Load time pays
+about 0.4s for it. A per-frame trace of the benchmark now shows no shader
+compiled during play.
+
+**Smaller leaks.** The spatial hash never deleted empty cells, so a moving
+population grew the map without bound; perception allocated a record per
+Pokémon per tick; and creature batches grew one instance at a time mid-write,
+each regrowth dropping what was already written — a herd of 100 drew 44 on the
+frame it appeared. Each has a regression test.
+
 ## Quality presets
 
 Five presets in `packages/render/src/pipeline/quality.ts`:
@@ -174,10 +232,19 @@ settings screen.
 
 ## Instancing
 
-Foliage and small props render through `packages/render/src/instancing/scatter.ts`
-with per-chunk instance budgets scaled by `foliageDensity`. Scatter positions
-are derived from the terrain function and the chunk seed, so they are stable
-across reloads and need no storage.
+**Pokémon** render through `packages/render/src/creatures/crowd.ts`: every
+visible Pokémon of one species at one detail level is one instance of one
+`InstancedMesh`, so 36 Pokémon on screen cost 5 draw calls. Near ones get the
+detailed mesh (~2,300 triangles on average), an ink outline and shadows; far
+ones get the low-detail mesh (~610). Animation runs in the vertex shader from a
+per-instance buffer, so a walking herd costs no CPU skinning. Culling is per
+instance on the CPU, and the preset's `maxVisiblePokemon` keeps the nearest.
+
+Foliage and small props are specified through
+`packages/render/src/instancing/scatter.ts` with per-chunk instance budgets
+scaled by `foliageDensity`. Scatter positions are derived from the terrain
+function and the chunk seed, so they are stable across reloads and need no
+storage. No foliage meshes exist yet to draw at those positions.
 
 ## Verification
 
@@ -199,7 +266,7 @@ across reloads and need no storage.
   vertex counts are real; milliseconds-per-pass are not measured.
 - **No occlusion culling.** Frustum culling only. A valley wall does not cull
   what is behind it.
-- **No texture streaming or mesh LOD for Pokémon.** Terrain has LODs; creatures
-  do not.
+- **No texture streaming.** Pokémon have two mesh LODs and no textures at all;
+  nothing streams.
 - **No memory budget enforcement.** Chunk disposal is correct, but there is no
   hard cap that evicts under pressure.

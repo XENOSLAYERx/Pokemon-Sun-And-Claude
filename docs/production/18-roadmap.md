@@ -8,7 +8,7 @@
 ## 1. Where we are
 
 **Milestone 0 is complete.** The technical foundation exists and is verified:
-eleven packages, 504 passing tests, a browser-verified client, a self-tested
+twelve packages, 553 passing tests, a browser-verified client, a self-tested
 authoritative server, and a content pipeline reporting zero errors.
 
 Everything below is forward-looking and therefore an estimate. The numbers in

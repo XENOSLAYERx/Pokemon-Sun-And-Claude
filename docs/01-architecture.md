@@ -19,7 +19,7 @@ It buys four things that are otherwise very expensive to retrofit:
 1. **The server runs the real game.** `apps/server` imports the same
    `@alola/world` and `@alola/ai` the client does. There is no second,
    drifting implementation of movement or spawning to keep in sync.
-2. **The simulation is testable.** 504 tests run in Node with no browser, no
+2. **The simulation is testable.** 553 tests run in Node with no browser, no
    GPU and no mocking layer. Ecosystem behaviour over 1,000 ticks is a unit
    test, not a play session.
 3. **It can move to a Worker.** Nothing in the simulation touches the main
@@ -222,9 +222,10 @@ Three rules, all visible in the code:
 
 Honest notes on what is prototype-grade in this repository:
 
-- **Pokémon rendering is procedural capsules.** Sized from real height/weight
-  and tinted by type, which is enough to observe and tune AI, but the art
-  pipeline (`15-art-pipeline.md`) is specified, not built.
+- **Pokémon and the player are procedural models**, built in code and animated
+  in the vertex shader. They read well and cost little, but they are not
+  authored art; the art pipeline (`15-art-pipeline.md`) is specified, not built.
+  Authored `.glb` files can replace any of them without code changes.
 - **The terrain shader is written but not wired.** The client uses a
   vertex-coloured standard material because the full shader needs texture
   arrays the content pipeline would bake. The shader compiles and is tested for
